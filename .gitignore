@@ -1,0 +1,55 @@
+# Build
+build/
+build-*/
+cmake-build-*/
+out/
+.cache/
+compile_commands.json
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.user
+*.swp
+*~
+
+# JUCE / plugin artefacts (if generated outside build/)
+**/JuceLibraryCode/
+*.vst3/
+*.component/
+*.aaxplugin/
+
+# Large media & local renders
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.wav
+output-test*
+output-offline*
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Misc
+*.log
+
+# Local agent / session state
+.agents/
+.zcode/
+.remember/
+.mimosa/
+.workbuddy/
+
+# Private development notes and test material (not part of the public project)
+docs/
+testdata/
+changelog.md
+pitfall.md
+CONTEXT.md
+scripts/extract_testdata.sh
+scripts/run_acceptance.sh
+scripts/run_pluginval.sh

@@ -1,0 +1,106 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (Universal 2)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DSTP_COPY_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j 3
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify universal binary
+        run: |
+          BIN="build/SyncTrackPrep_artefacts/Release/VST3/SyncTrack Prep.vst3/Contents/MacOS/SyncTrack Prep"
+          lipo -info "$BIN"
+          lipo -info "$BIN" | grep -q "arm64" && lipo -info "$BIN" | grep -q "x86_64"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cd "build/SyncTrackPrep_artefacts/Release/VST3"
+          zip -r -y "$GITHUB_WORKSPACE/dist/SyncTrack-Prep-${GITHUB_REF_NAME}-macOS-Universal.zip" "SyncTrack Prep.vst3"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-vst3
+          path: dist/*.zip
+
+  windows:
+    name: Windows (x64) — unverified in DAW
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DSTP_COPY_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j 3
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $src = "build/SyncTrackPrep_artefacts/Release/VST3/SyncTrack Prep.vst3"
+          Compress-Archive -Path $src -DestinationPath "dist/SyncTrack-Prep-$env:GITHUB_REF_NAME-Windows-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-vst3
+          path: dist/*.zip
+
+  release:
+    name: Draft release
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*.zip
+          body: |
+            ## Install
+
+            **macOS** — unzip, move `SyncTrack Prep.vst3` to `~/Library/Audio/Plug-Ins/VST3/`, then clear the quarantine flag:
+
+            ```bash
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/"SyncTrack Prep.vst3"
+            ```
+
+            **Windows** — unzip, move `SyncTrack Prep.vst3` to `C:\Program Files\Common Files\VST3\`.
+
+            Restart your DAW and rescan VST3 plug-ins.
+
+            ## Verified hosts
+
+            Cubase and Nuendo on macOS (real time and offline bounce).
+            The Windows build is compiled and unit-tested by CI but has **not** been verified inside a DAW yet.
