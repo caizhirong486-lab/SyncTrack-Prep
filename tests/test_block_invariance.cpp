@@ -27,7 +27,7 @@ juce::AudioBuffer<float> makeSignal (int numSamples)
 
 /** Runs one chain over the whole buffer using a fixed block size. Modules keep
     state across blocks, so the block size must not change the result. */
-juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int block, int preset, bool denoise)
+juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int block, int preset, bool denoise, float tone = 0.0f)
 {
     juce::AudioBuffer<float> buf (input);
     juce::dsp::ProcessSpec spec { sr, (juce::uint32) block, (juce::uint32) buf.getNumChannels() };
@@ -36,14 +36,18 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int bloc
     NoiseSuppressor ns;
     Leveler lv;
     PeakCompressor pc;
+    ToneShaper ts;
     TruePeakLimiter tp;
-    cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec); tp.prepare (spec);
+    cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec);
+    ts.prepare (spec); tp.prepare (spec);
 
-    const auto chain = Presets::chainFor (preset, denoise);
+    auto chain = Presets::chainFor (preset, denoise);
+    chain.toneShaper.tone = tone;
     cr.setParams (chain.channelRepair);
     ns.setParams (chain.noiseSuppressor);
     lv.setParams (chain.leveler);
     pc.setParams (chain.peakCompressor);
+    ts.setParams (chain.toneShaper);
     tp.setParams (chain.truePeakLimiter);
 
     for (int off = 0; off < buf.getNumSamples(); off += block)
@@ -56,6 +60,7 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int bloc
         cr.process (slice);
         lv.process (slice);
         ns.process (slice);
+        ts.process (slice);
         pc.process (slice);
         tp.process (slice);
 
@@ -190,4 +195,20 @@ TEST_CASE ("Denoise disabled is a pure delay, unchanged audio", "[denoise]")
         for (int i = latency; i < n; ++i)
             worst = juce::jmax (worst, std::abs (out.getSample (ch, i) - input.getSample (ch, i - latency)));
     REQUIRE (worst == 0.0f);
+}
+
+TEST_CASE ("ToneShaped chain is independent of host block size", "[blocksize][tone]")
+{
+    // The ToneShaper's biquad state must carry across blocks exactly like the
+    // other stages, including a live tone setting (not the transparent zero).
+    const auto input = makeSignal ((int) sr * 4);
+
+    const auto reference = render (input, 512, Presets::strong, false, 0.8f);
+    for (int block : { 64, 333, 1024 })
+    {
+        const auto other = render (input, block, Presets::strong, false, 0.8f);
+        const float diff = maxAbsDiff (reference, other);
+        INFO ("block " << block << ", max diff " << diff);
+        REQUIRE (diff < 1.0e-6f);
+    }
 }

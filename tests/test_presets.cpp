@@ -125,3 +125,23 @@ TEST_CASE ("Strong lifts quiet material more than Clean", "[presets]")
     INFO ("strong " << strongDb << " dB vs clean " << cleanDb << " dB");
     REQUIRE (strongDb > cleanDb + 1.0f);
 }
+
+TEST_CASE ("Denoise amount defaults and warm-dynamics compressor constants", "[presets]")
+{
+    REQUIRE (Presets::denoiseAmountDefault (Presets::soft) == 40);
+    REQUIRE (Presets::denoiseAmountDefault (Presets::strong) == 45);
+    REQUIRE (Presets::denoiseAmountDefault (Presets::clean) == 55);
+
+    for (int i = 0; i < Presets::count; ++i)
+    {
+        const auto chain = Presets::chainFor (i, Presets::denoiseDefault (i));
+        REQUIRE (chain.peakCompressor.ratio == 2.0f);
+        REQUIRE (chain.peakCompressor.attackMs == 15.0f);
+        REQUIRE (chain.peakCompressor.releaseMs == 120.0f);
+        REQUIRE (chain.peakCompressor.sceneOffsetDb == -4.0f);
+        REQUIRE (chain.toneShaper.enabled);
+        REQUIRE (chain.toneShaper.tone == 0.0f);
+        REQUIRE (std::abs (chain.noiseSuppressor.amount
+                           - (float) Presets::denoiseAmountDefault (i) / 100.0f) < 1.0e-4f);
+    }
+}

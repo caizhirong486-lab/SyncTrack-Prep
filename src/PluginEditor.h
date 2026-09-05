@@ -35,7 +35,11 @@ private:
     juce::ToggleButton denoiseBtn { "Denoise" };
     juce::ToggleButton bypassBtn { "Bypass" };
     juce::Slider outputSlider;
+    juce::Slider amountSlider;
+    juce::Slider toneSlider;
     juce::Label outputLabel;
+    juce::Label amountLabel;
+    juce::Label toneLabel;
     juce::Label inMeterLabel;
     juce::Label outMeterLabel;
 
@@ -49,7 +53,7 @@ private:
 
     std::unique_ptr<ComboAttachment> presetAtt;
     std::unique_ptr<ButtonAttachment> denoiseAtt, bypassAtt;
-    std::unique_ptr<SliderAttachment> outputAtt;
+    std::unique_ptr<SliderAttachment> outputAtt, amountAtt, toneAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SyncTrackPrepEditor)
 };

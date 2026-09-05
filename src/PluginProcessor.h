@@ -6,6 +6,7 @@
 #include "dsp/NoiseSuppressor.h"
 #include "dsp/Leveler.h"
 #include "dsp/PeakCompressor.h"
+#include "dsp/ToneShaper.h"
 #include "dsp/TruePeakLimiter.h"
 #include "dsp/Presets.h"
 
@@ -56,10 +57,13 @@ private:
     NoiseSuppressor noiseSuppressor;
     Leveler leveler;
     PeakCompressor peakCompressor;
+    ToneShaper toneShaper;
     TruePeakLimiter truePeakLimiter;
 
     std::atomic<float>* pPreset = nullptr;
     std::atomic<float>* pDenoise = nullptr;
+    std::atomic<float>* pDenoiseAmount = nullptr;
+    std::atomic<float>* pTone = nullptr;
     std::atomic<float>* pOutputGain = nullptr;
     std::atomic<float>* pBypass = nullptr;
 

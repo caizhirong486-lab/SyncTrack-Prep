@@ -61,7 +61,7 @@ void GoldKnobLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int
 SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (320, 480);
+    setSize (384, 480);
     setLookAndFeel (&goldLf);
 
     titleLabel.setText ("SyncTrack Prep", juce::dontSendNotification);
@@ -102,11 +102,32 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     outputSlider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
     addAndMakeVisible (outputSlider);
 
-    outputLabel.setText ("OUTPUT", juce::dontSendNotification);
-    outputLabel.setJustificationType (juce::Justification::centred);
-    outputLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.5f));
-    outputLabel.setFont (juce::FontOptions (11.0f));
+    auto styleSmallKnob = [] (juce::Slider& s)
+    {
+        s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s.setRotaryParameters (juce::MathConstants<float>::pi * 1.15f,
+                               juce::MathConstants<float>::pi * 2.85f,
+                               true);
+    };
+    styleSmallKnob (amountSlider);
+    styleSmallKnob (toneSlider);
+    addAndMakeVisible (amountSlider);
+    addAndMakeVisible (toneSlider);
+
+    auto styleKnobLabel = [] (juce::Label& l, const juce::String& text)
+    {
+        l.setText (text, juce::dontSendNotification);
+        l.setJustificationType (juce::Justification::centred);
+        l.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.5f));
+        l.setFont (juce::FontOptions (11.0f));
+    };
+    styleKnobLabel (outputLabel, "OUTPUT");
+    styleKnobLabel (amountLabel, "AMOUNT");
+    styleKnobLabel (toneLabel, "TONE");
     addAndMakeVisible (outputLabel);
+    addAndMakeVisible (amountLabel);
+    addAndMakeVisible (toneLabel);
 
     inMeterLabel.setJustificationType (juce::Justification::centredLeft);
     outMeterLabel.setJustificationType (juce::Justification::centredLeft);
@@ -122,6 +143,8 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     denoiseAtt = std::make_unique<ButtonAttachment> (ap, "denoise", denoiseBtn);
     bypassAtt  = std::make_unique<ButtonAttachment> (ap, "bypass", bypassBtn);
     outputAtt  = std::make_unique<SliderAttachment> (ap, "outputGain", outputSlider);
+    amountAtt  = std::make_unique<SliderAttachment> (ap, "denoiseAmount", amountSlider);
+    toneAtt    = std::make_unique<SliderAttachment> (ap, "tone", toneSlider);
 
     startTimerHz (30);
 }
@@ -184,13 +207,28 @@ void SyncTrackPrepEditor::resized()
     row1.removeFromLeft (12);
     denoiseBtn.setBounds (row1.removeFromLeft (100).withSizeKeepingCentre (100, 28));
 
-    r.removeFromTop (18);
+    r.removeFromTop (10);
 
-    // Knob zone (card interior)
+    // Knob zone (card interior): one hero knob + two support knobs
     auto knobZone = r.removeFromTop (200);
-    outputSlider.setBounds (knobZone.withSizeKeepingCentre (168, 168));
-    r.removeFromTop (4);
-    outputLabel.setBounds (r.removeFromTop (18));
+    auto knobRow = knobZone.removeFromTop (160);
+    auto labelRow = knobZone.removeFromTop (4 + 18);
+
+    const int outW = 160, amtW = 56, toneW = 96;
+    const int gap = 12;
+    const int rowW = outW + amtW + toneW + 2 * gap;
+    auto knobs = knobRow.withSizeKeepingCentre (rowW, 160);
+    outputSlider.setBounds (knobs.removeFromLeft (outW));
+    knobs.removeFromLeft (gap);
+    amountSlider.setBounds (knobs.removeFromLeft (amtW).withSizeKeepingCentre (amtW, amtW));
+    knobs.removeFromLeft (gap);
+    toneSlider.setBounds (knobs.removeFromLeft (toneW).withSizeKeepingCentre (toneW, toneW));
+
+    outputLabel.setBounds (labelRow.removeFromLeft (outW));
+    labelRow.removeFromLeft (gap);
+    amountLabel.setBounds (labelRow.removeFromLeft (amtW));
+    labelRow.removeFromLeft (gap);
+    toneLabel.setBounds (labelRow.removeFromLeft (toneW));
 
     r.removeFromTop (16);
 

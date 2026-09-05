@@ -8,10 +8,12 @@ SyncTrackPrepProcessor::SyncTrackPrepProcessor()
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", createParameterLayout())
 {
-    pPreset     = apvts.getRawParameterValue ("preset");
-    pDenoise    = apvts.getRawParameterValue ("denoise");
-    pOutputGain = apvts.getRawParameterValue ("outputGain");
-    pBypass     = apvts.getRawParameterValue ("bypass");
+    pPreset        = apvts.getRawParameterValue ("preset");
+    pDenoise       = apvts.getRawParameterValue ("denoise");
+    pDenoiseAmount = apvts.getRawParameterValue ("denoiseAmount");
+    pTone          = apvts.getRawParameterValue ("tone");
+    pOutputGain    = apvts.getRawParameterValue ("outputGain");
+    pBypass        = apvts.getRawParameterValue ("bypass");
 
     apvts.addParameterListener ("preset", this);
     applyPresetDefaults (1); // Strong default
@@ -35,6 +37,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout SyncTrackPrepProcessor::crea
 
     params.push_back (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "denoise", 1 }, "Denoise", Presets::denoiseDefault (Presets::strong)));
+
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "denoiseAmount", 1 }, "Amount",
+        juce::NormalisableRange<float> { 0.0f, 100.0f, 1.0f },
+        (float) Presets::denoiseAmountDefault (Presets::strong)));
+
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "tone", 1 }, "Tone",
+        juce::NormalisableRange<float> { -1.0f, 1.0f, 0.01f }, 0.0f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "outputGain", 1 }, "Output",
@@ -76,6 +87,13 @@ void SyncTrackPrepProcessor::applyPresetDefaults (int presetIndex)
         if (cur != denoiseOn)
             p->setValueNotifyingHost (denoiseOn ? 1.0f : 0.0f);
     }
+    if (auto* p = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("denoiseAmount")))
+    {
+        const float cur = p->get();
+        const float def = (float) Presets::denoiseAmountDefault (presetIndex);
+        if (std::abs (cur - def) > 1.0e-4f)
+            p->setValueNotifyingHost (p->convertTo0to1 (def));
+    }
     lastPreset = presetIndex;
 }
 
@@ -91,6 +109,7 @@ void SyncTrackPrepProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     noiseSuppressor.prepare (spec);
     leveler.prepare (spec);
     peakCompressor.prepare (spec);
+    toneShaper.prepare (spec);
     truePeakLimiter.prepare (spec);
 
     dryBypass.setSize (2, samplesPerBlock, false, true, true);
@@ -114,11 +133,17 @@ void SyncTrackPrepProcessor::updateDspParams()
     const int preset = juce::jlimit (0, 2, juce::roundToInt (pPreset != nullptr ? pPreset->load() : 1.0f));
     const bool denoiseOn = pDenoise != nullptr && pDenoise->load() >= 0.5f;
 
-    const auto chain = Presets::chainFor (preset, denoiseOn);
+    auto chain = Presets::chainFor (preset, denoiseOn);
+    // The Amount knob and Tone knob own these two; the preset only seeds them.
+    if (pDenoiseAmount != nullptr)
+        chain.noiseSuppressor.amount = juce::jlimit (0.0f, 1.0f, pDenoiseAmount->load() / 100.0f);
+    if (pTone != nullptr)
+        chain.toneShaper.tone = juce::jlimit (-1.0f, 1.0f, pTone->load());
     channelRepair.setParams (chain.channelRepair);
     noiseSuppressor.setParams (chain.noiseSuppressor);
     leveler.setParams (chain.leveler);
     peakCompressor.setParams (chain.peakCompressor);
+    toneShaper.setParams (chain.toneShaper);
     truePeakLimiter.setParams (chain.truePeakLimiter);
 }
 
@@ -151,15 +176,19 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     channelRepair.process (buffer);
     leveler.process (buffer);
     noiseSuppressor.process (buffer);
+    toneShaper.process (buffer);
 
     // Output is the chain's makeup gain, ahead of the always-on safety stages:
     // the -1 dBTP ceiling holds at any knob position. The
     // compressor acts on the boosted signal, and the limiter clamps whatever
     // the knob adds beyond it — so +12 dB adds almost no loudness.
-    const float outG = juce::Decibels::decibelsToGain (
-        pOutputGain != nullptr ? pOutputGain->load() : 0.0f);
-    buffer.applyGain (outG);
+    const float outGdB = pOutputGain != nullptr ? pOutputGain->load() : 0.0f;
+    buffer.applyGain (juce::Decibels::decibelsToGain (outGdB));
 
+    // The compressor references the post-leveler scene level (the leveler
+    // normalizes it near -18 dB) plus the output gain, so threshold tracking
+    // survives the makeup gain instead of drifting with the knob.
+    peakCompressor.setSceneLevelDb (leveler.getSlowEnvDb() + outGdB);
     peakCompressor.process (buffer);
     truePeakLimiter.process (buffer);
 

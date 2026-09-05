@@ -29,6 +29,15 @@ public:
 
     float getLastGainDb() const { return lastGainDb; }
 
+    /** Scene level as the downstream peak compressor sees it, in dB (floor -100).
+        slowEnv tracks the input-side scene; the applied gain is what the leveler
+        actually delivered, so the product is the post-leveler scene level the
+        compressor should reference its threshold against. */
+    float getSlowEnvDb() const
+    {
+        return juce::Decibels::gainToDecibels (slowEnv * gain, -100.0f);
+    }
+
     /**
      * Noise-aware gating.
      *

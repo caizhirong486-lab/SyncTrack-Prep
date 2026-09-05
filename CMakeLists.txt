@@ -56,6 +56,7 @@ target_sources(SyncTrackPrep
         src/PluginEditor.cpp
         src/dsp/ChannelRepair.cpp
         src/dsp/PeakCompressor.cpp
+        src/dsp/ToneShaper.cpp
         src/dsp/TruePeakLimiter.cpp
         src/dsp/Leveler.cpp
         src/dsp/NoiseSuppressor.cpp
@@ -84,6 +85,7 @@ add_executable(SyncTrackPrepOffline
     tools/offline_render.cpp
     src/dsp/ChannelRepair.cpp
     src/dsp/PeakCompressor.cpp
+    src/dsp/ToneShaper.cpp
     src/dsp/TruePeakLimiter.cpp
     src/dsp/Leveler.cpp
     src/dsp/NoiseSuppressor.cpp
@@ -123,6 +125,7 @@ if(STP_BUILD_TESTS)
     add_executable(SyncTrackPrepTests
         tests/test_channel_repair.cpp
         tests/test_peak_compressor.cpp
+        tests/test_tone_shaper.cpp
         tests/test_true_peak_limiter.cpp
         tests/test_true_peak.cpp
         tests/test_leveler.cpp
@@ -132,6 +135,7 @@ if(STP_BUILD_TESTS)
         tests/test_offline_gold.cpp
         src/dsp/ChannelRepair.cpp
         src/dsp/PeakCompressor.cpp
+        src/dsp/ToneShaper.cpp
         src/dsp/TruePeakLimiter.cpp
         src/dsp/Leveler.cpp
         src/dsp/NoiseSuppressor.cpp

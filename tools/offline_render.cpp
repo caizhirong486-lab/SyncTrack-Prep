@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * Offline render — Round 2 presets.
- * Usage: SyncTrackPrepOffline <in.wav> <out.wav> [soft|strong|clean] [denoise 0|1]
+ * Usage: SyncTrackPrepOffline <in.wav> <out.wav> [soft|strong|clean] [denoise 0|1] [amount 0-100] [tone -1..1]
  */
 #include "dsp/Presets.h"
 
@@ -9,19 +9,26 @@
 #include <iostream>
 #include <cstring>
 
-static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset, bool denoiseOn)
+static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset, bool denoiseOn,
+                        float denoiseAmountPct, float tone)
 {
     juce::dsp::ProcessSpec spec { sr, (juce::uint32) juce::jmax (1, buf.getNumSamples()),
                                   (juce::uint32) juce::jmax (1, buf.getNumChannels()) };
 
-    ChannelRepair cr; NoiseSuppressor ns; Leveler lv; PeakCompressor pc; TruePeakLimiter tp;
-    cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec); tp.prepare (spec);
+    ChannelRepair cr; NoiseSuppressor ns; Leveler lv; PeakCompressor pc;
+    ToneShaper ts; TruePeakLimiter tp;
+    cr.prepare (spec); ns.prepare (spec); lv.prepare (spec);
+    pc.prepare (spec); ts.prepare (spec); tp.prepare (spec);
 
-    const auto chain = Presets::chainFor (preset, denoiseOn);
+    auto chain = Presets::chainFor (preset, denoiseOn);
+    if (denoiseAmountPct >= 0.0f)
+        chain.noiseSuppressor.amount = juce::jlimit (0.0f, 1.0f, denoiseAmountPct / 100.0f);
+    chain.toneShaper.tone = juce::jlimit (-1.0f, 1.0f, tone);
     cr.setParams (chain.channelRepair);
     ns.setParams (chain.noiseSuppressor);
     lv.setParams (chain.leveler);
     pc.setParams (chain.peakCompressor);
+    ts.setParams (chain.toneShaper);
     tp.setParams (chain.truePeakLimiter);
 
     const int block = 512;
@@ -31,7 +38,11 @@ static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset, bo
         juce::AudioBuffer<float> slice (buf.getNumChannels(), n);
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
             slice.copyFrom (ch, 0, buf, ch, off, n);
-        cr.process (slice); lv.process (slice); ns.process (slice); pc.process (slice); tp.process (slice);
+        cr.process (slice); lv.process (slice); ns.process (slice); ts.process (slice);
+        // Same scene reference the plugin feeds the compressor: the leveler's
+        // post-gain scene level (offline applies no output gain, so +0 dB).
+        pc.setSceneLevelDb (lv.getSlowEnvDb());
+        pc.process (slice); tp.process (slice);
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
             buf.copyFrom (ch, off, slice, ch, 0, n);
     }
@@ -41,7 +52,7 @@ int main (int argc, char** argv)
 {
     if (argc < 3)
     {
-        std::cerr << "Usage: SyncTrackPrepOffline <in.wav> <out.wav> [soft|strong|clean] [denoise 0|1]\n";
+        std::cerr << "Usage: SyncTrackPrepOffline <in.wav> <out.wav> [soft|strong|clean] [denoise 0|1] [amount 0-100] [tone -1..1]\n";
         return 1;
     }
     int preset = Presets::strong;
@@ -54,6 +65,14 @@ int main (int argc, char** argv)
     bool denoise = Presets::denoiseDefault (preset);
     if (argc >= 5)
         denoise = std::atoi (argv[4]) != 0;
+
+    // amount < 0 means "use the preset default"
+    float amount = -1.0f;
+    if (argc >= 6)
+        amount = (float) std::atof (argv[5]);
+    float tone = 0.0f;
+    if (argc >= 7)
+        tone = (float) std::atof (argv[6]);
 
     juce::File inFile (argv[1]), outFile (argv[2]);
     juce::AudioFormatManager fm; fm.registerBasicFormats();
@@ -70,7 +89,7 @@ int main (int argc, char** argv)
         buf = std::move (st);
     }
 
-    applyChain (buf, reader->sampleRate, preset, denoise);
+    applyChain (buf, reader->sampleRate, preset, denoise, amount, tone);
 
     if (outFile.existsAsFile())
         outFile.deleteFile();
@@ -81,6 +100,7 @@ int main (int argc, char** argv)
         wav.createWriterFor (fos, reader->sampleRate, (unsigned int) buf.getNumChannels(), 24, {}, 0));
     if (writer == nullptr) { delete fos; return 1; }
     writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
-    std::cout << "Wrote " << argv[2] << " preset=" << preset << " denoise=" << (denoise ? 1 : 0) << "\n";
+    std::cout << "Wrote " << argv[2] << " preset=" << preset << " denoise=" << (denoise ? 1 : 0)
+              << " amount=" << amount << " tone=" << tone << "\n";
     return 0;
 }

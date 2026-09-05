@@ -39,6 +39,13 @@ float getFloat (juce::AudioProcessorValueTreeState& apvts, const char* id)
     REQUIRE (p != nullptr);
     return p->convertFrom0to1 (p->getValue());
 }
+
+void setFloat (juce::AudioProcessorValueTreeState& apvts, const char* id, float value)
+{
+    auto* p = apvts.getParameter (id);
+    REQUIRE (p != nullptr);
+    p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
 }
 
 TEST_CASE ("State round-trip keeps a manual denoise choice", "[state]")
@@ -270,4 +277,55 @@ TEST_CASE ("Re-selecting the same preset keeps the manual denoise choice", "[sta
     setBool (p.apvts, "denoise", false);
     setChoice (p.apvts, "preset", 2); // same preset again -> keeps off
     REQUIRE (! getBool (p.apvts, "denoise"));
+}
+
+TEST_CASE ("State round-trip keeps amount and tone knobs", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    juce::MemoryBlock saved;
+    {
+        SyncTrackPrepProcessor src;
+        setChoice (src.apvts, "preset", 1);
+        setFloat (src.apvts, "denoiseAmount", 72.0f);
+        setFloat (src.apvts, "tone", -0.4f);
+        src.getStateInformation (saved);
+    }
+
+    SyncTrackPrepProcessor dst;
+    dst.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    REQUIRE (std::abs (getFloat (dst.apvts, "denoiseAmount") - 72.0f) < 0.05f);
+    REQUIRE (std::abs (getFloat (dst.apvts, "tone") - (-0.4f)) < 0.005f);
+}
+
+TEST_CASE ("Switching preset applies its amount default", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 45.0f) < 0.05f); // Strong seed
+
+    setChoice (p.apvts, "preset", 0); // Soft
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 40.0f) < 0.05f);
+
+    setChoice (p.apvts, "preset", 2); // Clean
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 55.0f) < 0.05f);
+}
+
+TEST_CASE ("Re-selecting the same preset keeps a manual amount", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    setChoice (p.apvts, "preset", 1);
+    setFloat (p.apvts, "denoiseAmount", 80.0f); // user pushes the knob
+
+    // Same preset again is not a gesture.
+    setChoice (p.apvts, "preset", 1);
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 80.0f) < 0.05f);
+
+    // A real switch reseeds the default.
+    setChoice (p.apvts, "preset", 0);
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 40.0f) < 0.05f);
 }
