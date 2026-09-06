@@ -33,10 +33,6 @@ void PeakCompressor::process (juce::AudioBuffer<float>& buffer)
     // lower clamp is needed — only the -1 dBFS ceiling keeps a loud scene from
     // pushing the threshold into clipping territory. Without a scene level the
     // legacy params.thresholdDb applies unchanged.
-    const float thrDb = sceneLevelValid
-        ? juce::jmin (sceneLevelDb + params.sceneOffsetDb, thrCeilDb)
-        : params.thresholdDb;
-
     const float s = juce::jlimit (0.0f, 1.0f, params.strength);
     const float ratio = 1.0f + (juce::jmax (1.01f, params.ratio) - 1.0f) * s;
 
@@ -86,6 +82,14 @@ void PeakCompressor::process (juce::AudioBuffer<float>& buffer)
             transientMode = false;
 
         const float envDb = juce::Decibels::gainToDecibels (envelope, -100.0f);
+        // Per-sample scene tracking keeps the threshold stream itself
+        // block-size independent (a per-block snapshot leaks host block sizes
+        // into the output — caught by the block-invariance test).
+        const float thrDb = sceneStream != nullptr
+            ? juce::jmin ((*sceneStream)[(size_t) i] + sceneLevelDb + params.sceneOffsetDb, thrCeilDb)
+            : (sceneLevelValid
+                ? juce::jmin (sceneLevelDb + params.sceneOffsetDb, thrCeilDb)
+                : params.thresholdDb);
         float grDb = 0.0f;
         if (envDb > thrDb && ratio > 1.0f)
         {

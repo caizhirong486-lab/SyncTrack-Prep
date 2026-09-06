@@ -32,7 +32,8 @@ private:
     juce::Label titleLabel;
     juce::ComboBox presetBox;
     juce::Label presetLabel;
-    juce::ToggleButton denoiseBtn { "Denoise" };
+    juce::ComboBox denoiseModeBox;
+    juce::Label hqHintLabel;
     juce::ToggleButton bypassBtn { "Bypass" };
     juce::Slider outputSlider;
     juce::Slider amountSlider;
@@ -52,7 +53,8 @@ private:
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     std::unique_ptr<ComboAttachment> presetAtt;
-    std::unique_ptr<ButtonAttachment> denoiseAtt, bypassAtt;
+    std::unique_ptr<ComboAttachment> denoiseModeAtt;
+    std::unique_ptr<ButtonAttachment> bypassAtt;
     std::unique_ptr<SliderAttachment> outputAtt, amountAtt, toneAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SyncTrackPrepEditor)

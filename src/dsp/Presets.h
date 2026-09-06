@@ -2,10 +2,12 @@
 #pragma once
 
 #include "ChannelRepair.h"
+#include "DenoiseStage.h"
 #include "NoiseSuppressor.h"
 #include "Leveler.h"
 #include "PeakCompressor.h"
 #include "ToneShaper.h"
+#include "UpwardExpander.h"
 #include "TruePeakLimiter.h"
 
 /**
@@ -30,6 +32,7 @@ struct Chain
     Leveler::Params leveler;
     PeakCompressor::Params peakCompressor;
     ToneShaper::Params toneShaper;
+    UpwardExpander::Params upwardExpander;
     TruePeakLimiter::Params truePeakLimiter;
 };
 
@@ -43,11 +46,26 @@ inline const char* name (int index)
     }
 }
 
-/** Denoise default for a preset; the user may override it afterwards. */
+/** Denoise default for a preset; the user may override it afterwards.
+    Legacy bool default (clean only) kept for old-state mapping. */
 inline bool denoiseDefault (int index) { return index == clean; }
 
+/** Denoise mode default for a preset: Strong upgrades to the NN Live engine,
+    Clean keeps the classic spectral denoiser, Soft starts with denoise off. */
+inline DenoiseMode denoiseModeDefault (int index)
+{
+    switch (index)
+    {
+        case strong: return DenoiseMode::live;
+        case clean:  return DenoiseMode::classic;
+        default:     return DenoiseMode::off;
+    }
+}
+
 /** Denoise amount default (%) for a preset; the Amount knob starts here and
-    the user may push it above (the knob's ceiling 100% exceeds every preset). */
+    the user may push it above (the knob's ceiling 100% exceeds every preset).
+    Seeded on the Classic over-subtraction curve; the DFN3 atten-limit mapping
+    may re-tune Strong's default (plan decision 7) — record any change. */
 inline int denoiseAmountDefault (int index)
 {
     switch (index)
@@ -58,9 +76,10 @@ inline int denoiseAmountDefault (int index)
     }
 }
 
-inline Chain chainFor (int presetIndex, bool denoiseOn)
+inline Chain chainFor (int presetIndex, DenoiseMode mode)
 {
     const int preset = juce::jlimit (0, count - 1, presetIndex);
+    const bool denoiseOn = mode != DenoiseMode::off;
 
     float maxGainDb = 14.0f;
     float maxAttenDb = 10.0f;
@@ -105,7 +124,7 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
     c.channelRepair.sideFightRatio = 0.55f;
     c.channelRepair.activityDb = -60.0f;
 
-    c.noiseSuppressor.enabled = denoiseOn;
+    c.noiseSuppressor.enabled = (mode == DenoiseMode::classic);
     c.noiseSuppressor.amount = denoiseAmountDefault (preset) / 100.0f;
     c.noiseSuppressor.hpfHz = 70.0f;
     // Soft spectral subtraction + strong speech-band protect (anti-distortion)
@@ -134,6 +153,13 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
 
     c.toneShaper.enabled = true;
     c.toneShaper.tone = 0.0f;
+
+    c.upwardExpander.enabled = true;
+    c.upwardExpander.ratio = 1.5f;
+    c.upwardExpander.rangeDb = 8.0f;   // Step 5 control experiment may converge to 0
+    c.upwardExpander.attackMs = 5.0f;
+    c.upwardExpander.releaseMs = 150.0f;
+    c.upwardExpander.sceneOffsetDb = -20.0f;
 
     c.truePeakLimiter.enabled = true;
     c.truePeakLimiter.ceilingDb = -1.0f;

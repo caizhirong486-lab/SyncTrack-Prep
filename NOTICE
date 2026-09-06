@@ -1,0 +1,18 @@
+SyncTrack Prep — third-party components bundled with the plug-in
+================================================================
+
+DeepFilterNet3 model + libDF runtime (Live tier)
+  Copyright (c) Hendrik Schröter (Rikorose/DeepFilterNet)
+  Licensed under the MIT License and the Apache License 2.0.
+  https://github.com/Rikorose/DeepFilterNet
+
+ONNX Runtime (HQ tier inference engine)
+  Copyright (c) Microsoft Corporation. MIT License.
+  https://github.com/microsoft/onnxruntime
+
+MossFormer2_SE_48K model weights (HQ tier)
+  Copyright (c) Alibaba Group (alibabasglab/MossFormer2_SE_48K / ClearerVoice-Studio)
+  Licensed under the Apache License 2.0.
+  https://huggingface.co/alibabasglab/MossFormer2_SE_48K
+
+All of the above are redistributed unmodified as separate model/library files.

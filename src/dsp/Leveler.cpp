@@ -4,6 +4,10 @@
 
 void Leveler::prepare (const juce::dsp::ProcessSpec& spec)
 {
+    // Sized here so process() never allocates and the downstream stages can
+    // index the whole block unconditionally.
+    sceneStreamBuf.assign ((size_t) juce::jmax (1u, spec.maximumBlockSize),
+                           juce::Decibels::gainToDecibels (0.0f, -100.0f));
     sampleRate = spec.sampleRate > 0.0 ? spec.sampleRate : 48000.0;
     reset();
 }
@@ -21,6 +25,10 @@ void Leveler::reset()
 
 void Leveler::process (juce::AudioBuffer<float>& buffer)
 {
+    // Contract: after process() the first getNumSamples() entries of the scene
+    // stream are valid, disabled or not — the compressor and expander index it
+    // unconditionally.
+    ensureSceneStream (buffer.getNumSamples());
     const int numCh = buffer.getNumChannels();
     const int n = buffer.getNumSamples();
     if (numCh <= 0 || n <= 0 || ! params.enabled)
@@ -109,6 +117,8 @@ void Leveler::process (juce::AudioBuffer<float>& buffer)
         }
 
         gain += gCoef * (targetGain - gain);
+
+        sceneStreamBuf[(size_t) i] = juce::Decibels::gainToDecibels (slowEnv * gain, -100.0f);
 
         for (int ch = 0; ch < numCh; ++ch)
             buffer.getWritePointer (ch)[i] *= gain;

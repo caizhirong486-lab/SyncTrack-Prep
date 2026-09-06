@@ -53,3 +53,10 @@ CONTEXT.md
 scripts/extract_testdata.sh
 scripts/run_acceptance.sh
 scripts/run_pluginval.sh
+
+# NN engine third-party artifacts (rebuilt via scripts/build_libdf.sh + scripts/fetch_models.sh)
+third_party/
+!third_party/dfn/include/df.h
+
+# Stray ORT copy if a non-bundle target is built from the source root
+/Frameworks/

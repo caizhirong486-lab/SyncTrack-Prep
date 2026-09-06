@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #pragma once
 
+#include <vector>
+
 #include <juce_dsp/juce_dsp.h>
 
 /** Fast downward compressor for peaks / bangs. */
@@ -31,6 +33,11 @@ public:
     /** Reference scene level in dB for threshold coupling (post-leveler).
         Until called, the compressor falls back to params.thresholdDb. */
     void setSceneLevelDb (float db) { sceneLevelDb = db; sceneLevelValid = true; }
+    /** Continuous scene source: the leveler's per-sample slow-env stream.
+        When bound, the threshold tracks it every sample and sceneLevelDb acts
+        as the additive base (the output makeup gain); unbound, sceneLevelDb is
+        the absolute scene level (tests, offline tools). */
+    void bindSceneSource (const std::vector<float>* stream) { sceneStream = stream; }
 
 private:
     Params params;
@@ -41,6 +48,7 @@ private:
     // Scene-adaptive threshold
     float sceneLevelDb = -100.0f;
     bool sceneLevelValid = false;
+    const std::vector<float>* sceneStream = nullptr; // per-sample scene of the current block
 
     // Release discrimination: short peak vs slow RMS envelope
     float peakEnv = 0.0f;

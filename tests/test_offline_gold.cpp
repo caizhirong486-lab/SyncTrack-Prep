@@ -49,7 +49,7 @@ void processChain (juce::AudioBuffer<float>& buf, double sr)
     cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec); tp.prepare (spec);
 
     // Strong preset, straight from the shared table the plugin uses.
-    const auto chain = Presets::chainFor (Presets::strong, false);
+    const auto chain = Presets::chainFor (Presets::strong, DenoiseMode::off);
     cr.setParams (chain.channelRepair);
     ns.setParams (chain.noiseSuppressor);
     lv.setParams (chain.leveler);
