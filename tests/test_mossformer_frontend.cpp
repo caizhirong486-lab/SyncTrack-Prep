@@ -10,8 +10,11 @@ juce::File mossModelFromEnv()
 {
     if (auto* env = std::getenv ("STP_MOSS_MODEL"))
         return juce::File (juce::String (env));
+    // The bundle ships FP32: INT8 was quantized and rejected by the quality
+    // gate (QDQ static correlation 0.66 on the reference material — see the
+    // 2026-09-06 changelog entry). Test against the shipped model.
     return juce::File::getCurrentWorkingDirectory()
-               .getChildFile ("third_party/mossformer2/mossformer2_int8.onnx");
+               .getChildFile ("third_party/mossformer2/mossformer2_fp32.onnx");
 }
 }
 
@@ -20,7 +23,7 @@ TEST_CASE ("MossFormer stitching: chunk boundaries stay continuous and latency i
     const auto model = mossModelFromEnv();
     if (! model.existsAsFile())
     {
-        SKIP ("MossFormer ONNX model not present (third_party/mossformer2/mossformer2_int8.onnx)");
+        SKIP ("MossFormer ONNX model not present (third_party/mossformer2/mossformer2_fp32.onnx)");
     }
 #ifdef STP_ENABLE_MOSSFORMER
     MossFormerDenoise den;

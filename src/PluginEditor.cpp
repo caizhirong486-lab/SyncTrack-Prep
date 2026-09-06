@@ -70,6 +70,15 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     presetBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);
     addAndMakeVisible (presetBox);
 
+    // ComboBoxAttachment only syncs the value - it does NOT populate items.
+    // Items must be added BEFORE the attachment is created (PluginEditor.cpp:144),
+    // otherwise the initial sync fails and the dropdown shows "(no choices)".
+    {
+        juce::StringArray modeNames;
+        for (int m = 0; m < numDenoiseModes; ++m)
+            modeNames.add (denoiseModeName (m));
+        denoiseModeBox.addItemList (modeNames, 1);
+    }
     denoiseModeBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff1e222b));
     denoiseModeBox.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff3a4050));
     denoiseModeBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);

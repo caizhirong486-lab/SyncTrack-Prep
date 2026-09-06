@@ -289,7 +289,9 @@ if(STP_BUILD_TESTS)
     include(CTest)
     list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
     include(Catch)
-    catch_discover_tests(SyncTrackPrepTests)
+    # Run tests from the source root so third_party/<model> relative paths in
+    # the test helpers resolve (the default working dir is the binary dir).
+    catch_discover_tests(SyncTrackPrepTests WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
     # Processor-level tests need the plugin shared-code target (APVTS, state,
     # JucePlugin_* definitions), which the DSP-only test binary does not link.
