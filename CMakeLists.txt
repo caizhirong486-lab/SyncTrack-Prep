@@ -291,12 +291,14 @@ if(STP_BUILD_TESTS)
     include(Catch)
     # Run tests from the source root so third_party/<model> relative paths in
     # the test helpers resolve (the default working dir is the binary dir).
-    # SKIP_RETURN_CODE 0: CI runners have no third_party (gitignored); Catch2
-    # SKIPs must not be reported as test failures or the CI Test step wedges
-    # and the package / release jobs never run.
+    # SKIP_RETURN_CODE 4: CI runners have no third_party (gitignored), so those
+    # cases call Catch2 SKIP(). Catch2 exits 4 when every case in the run was
+    # skipped; ctest must map that to "skipped", not "failed". Never use 0 here
+    # — 0 is a *passing* run, and mapping it to skipped silently disables the
+    # entire test suite.
     catch_discover_tests(SyncTrackPrepTests
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        PROPERTIES SKIP_RETURN_CODE 0
+        PROPERTIES SKIP_RETURN_CODE 4
     )
 
     # Processor-level tests need the plugin shared-code target (APVTS, state,
@@ -321,5 +323,5 @@ if(STP_BUILD_TESTS)
 
     stp_link_nn_engines(SyncTrackPrepStateTests ON)
 
-    catch_discover_tests(SyncTrackPrepStateTests PROPERTIES SKIP_RETURN_CODE 0)
+    catch_discover_tests(SyncTrackPrepStateTests PROPERTIES SKIP_RETURN_CODE 4)
 endif()

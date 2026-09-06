@@ -3,13 +3,6 @@
 #include "dsp/UpwardExpander.h"
 #include <cmath>
 
-// Pitfall 2026-09-06: on Windows / MSVC Release these two UpwardExpander
-// tests reliably trigger a heap corruption (0xc0000374) that cascades
-// into a segfault in the second case. macOS / Clang and local Linux
-// builds pass cleanly. The grey-tester validates the chain in Nuendo on
-// Windows, so the unit-test gap is covered by integration testing —
-// re-enable once the MSVC-specific bug is fixed.
-#if ! defined(_WIN32)
 namespace
 {
 double rmsDb (const juce::AudioBuffer<float>& b, int start, int len)
@@ -53,12 +46,13 @@ TEST_CASE ("UpwardExpander lifts quiet passages up to range and passes loud pass
     const int block = 512;
     for (int off = 0; off < buf.getNumSamples(); off += block)
     {
-        juce::AudioBuffer<float> slice (2, block);
-        slice.copyFrom (0, 0, buf, 0, off, block);
-        slice.copyFrom (1, 0, buf, 0, off, block);
+        const int len = juce::jmin (block, buf.getNumSamples() - off);
+        juce::AudioBuffer<float> slice (2, len);
+        slice.copyFrom (0, 0, buf, 0, off, len);
+        slice.copyFrom (1, 0, buf, 0, off, len);
         ue.process (slice);
-        buf.copyFrom (0, off, slice, 0, 0, block);
-        buf.copyFrom (1, off, slice, 1, 0, block);
+        buf.copyFrom (0, off, slice, 0, 0, len);
+        buf.copyFrom (1, off, slice, 1, 0, len);
     }
 
     const float quietDb = rmsDb (buf, (int) (0.5 * sr), (int) (0.4 * sr));
@@ -93,12 +87,13 @@ TEST_CASE ("UpwardExpander disabled or zero range is transparent", "[expander]")
         }
         for (int off = 0; off < 48000; off += 512)
         {
-            juce::AudioBuffer<float> slice (2, 512);
-            slice.copyFrom (0, 0, buf, 0, off, 512);
-            slice.copyFrom (1, 0, buf, 0, off, 512);
+            const int len = juce::jmin (512, 48000 - off);
+            juce::AudioBuffer<float> slice (2, len);
+            slice.copyFrom (0, 0, buf, 0, off, len);
+            slice.copyFrom (1, 0, buf, 0, off, len);
             ue.process (slice);
-            buf.copyFrom (0, off, slice, 0, 0, 512);
-            buf.copyFrom (1, off, slice, 1, 0, 512);
+            buf.copyFrom (0, off, slice, 0, 0, len);
+            buf.copyFrom (1, off, slice, 1, 0, len);
         }
         float worst = 0.0f;
         for (int i = 4800; i < 48000; ++i) // skip attack region
@@ -108,4 +103,3 @@ TEST_CASE ("UpwardExpander disabled or zero range is transparent", "[expander]")
         REQUIRE (worst < 1.0e-4f);
     }
 }
-#endif // ! defined(_WIN32) — see pitfall 2026-09-06
