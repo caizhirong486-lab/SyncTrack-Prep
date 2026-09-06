@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #pragma once
 
+#include <vector>
+
 #include <juce_dsp/juce_dsp.h>
 
 /** Dual-timescale auto-gain: fast for speech, slow for scene loudness. */
@@ -28,6 +30,33 @@ public:
     void process (juce::AudioBuffer<float>& buffer);
 
     float getLastGainDb() const { return lastGainDb; }
+
+    /** Scene level as the downstream peak compressor sees it, in dB (floor -100).
+        slowEnv tracks the input-side scene; the applied gain is what the leveler
+        actually delivered, so the product is the post-leveler scene level the
+        compressor should reference its threshold against. */
+    float getSlowEnvDb() const
+    {
+        return juce::Decibels::gainToDecibels (slowEnv * gain, -100.0f);
+    }
+
+    /** Per-sample post-gain scene level for the block just processed.
+        The compressor and expander run on the same block right after the
+        leveler and index this stream sample-by-sample, so the scene threshold
+        stream is continuous and block-size independent. */
+    const std::vector<float>& sceneStream() const { return sceneStreamBuf; }
+
+    /** Guarantees n valid entries in the scene stream (grows only outside the
+        audio thread's normal path: prepare() sizes it for the declared block). */
+    void ensureSceneStream (int n)
+    {
+        if ((int) sceneStreamBuf.size() < n)
+            sceneStreamBuf.resize ((size_t) n,
+                                   juce::Decibels::gainToDecibels (slowEnv * gain, -100.0f));
+        const float cur = juce::Decibels::gainToDecibels (slowEnv * gain, -100.0f);
+        for (int i = 0; i < n; ++i)
+            sceneStreamBuf[(size_t) i] = cur;
+    }
 
     /**
      * Noise-aware gating.
@@ -69,6 +98,7 @@ private:
     float fastEnv = 0.0f;
     float slowEnv = 0.0f;
     float gain = 1.0f;
+    std::vector<float> sceneStreamBuf;
     float lastGainDb = 0.0f;
 
     float fastAvg = 0.0f;

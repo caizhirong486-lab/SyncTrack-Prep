@@ -45,23 +45,12 @@ void GoldKnobLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int
     p.addRoundedRectangle (-2.0f, -pr, 4.0f, pr * 0.55f, 1.5f);
     g.setColour (juce::Colour (0xff2a1a00));
     g.fillPath (p, juce::AffineTransform::rotation (angle).translated (cx, cy));
-
-    // Tick marks
-    g.setColour (juce::Colours::white.withAlpha (0.25f));
-    for (int i = 0; i <= 10; ++i)
-    {
-        const float a = rotaryStartAngle + (float) i / 10.0f * (rotaryEndAngle - rotaryStartAngle);
-        const float x1 = cx + (radius - 2.0f) * std::cos (a - juce::MathConstants<float>::halfPi);
-        const float y1 = cy + (radius - 2.0f) * std::sin (a - juce::MathConstants<float>::halfPi);
-        // use angle from 12 o'clock: juce rotary uses different convention
-        juce::ignoreUnused (x1, y1);
-    }
 }
 
 SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (320, 480);
+    setSize (384, 520);
     setLookAndFeel (&goldLf);
 
     titleLabel.setText ("SyncTrack Prep", juce::dontSendNotification);
@@ -81,15 +70,31 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     presetBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);
     addAndMakeVisible (presetBox);
 
-    auto styleToggle = [] (juce::ToggleButton& b)
+    // ComboBoxAttachment only syncs the value - it does NOT populate items.
+    // Items must be added BEFORE the attachment is created (PluginEditor.cpp:144),
+    // otherwise the initial sync fails and the dropdown shows "(no choices)".
     {
-        b.setClickingTogglesState (true);
-        b.setColour (juce::ToggleButton::textColourId, juce::Colours::white.withAlpha (0.9f));
-        b.setColour (juce::ToggleButton::tickColourId, juce::Colour (0xfff0c14b));
-    };
-    styleToggle (denoiseBtn);
-    styleToggle (bypassBtn);
-    addAndMakeVisible (denoiseBtn);
+        juce::StringArray modeNames;
+        for (int m = 0; m < numDenoiseModes; ++m)
+            modeNames.add (denoiseModeName (m));
+        denoiseModeBox.addItemList (modeNames, 1);
+    }
+    denoiseModeBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff1e222b));
+    denoiseModeBox.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff3a4050));
+    denoiseModeBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);
+    addAndMakeVisible (denoiseModeBox);
+
+    hqHintLabel.setText ("HQ needs offline rendering - realtime playback runs Live (DFN3)",
+                         juce::dontSendNotification);
+    hqHintLabel.setColour (juce::Label::textColourId, juce::Colour (0xfff0c14b));
+    hqHintLabel.setFont (juce::FontOptions (10.5f));
+    hqHintLabel.setJustificationType (juce::Justification::centred);
+    addAndMakeVisible (hqHintLabel);
+    hqHintLabel.setVisible (false);
+
+    bypassBtn.setClickingTogglesState (true);
+    bypassBtn.setColour (juce::ToggleButton::textColourId, juce::Colours::white.withAlpha (0.9f));
+    bypassBtn.setColour (juce::ToggleButton::tickColourId, juce::Colour (0xfff0c14b));
     addAndMakeVisible (bypassBtn);
 
     outputSlider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -100,13 +105,39 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     outputSlider.setColour (juce::Slider::textBoxTextColourId, juce::Colours::white);
     outputSlider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     outputSlider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    // Below -60 dB the knob reads -inf by convention (actual floor is -80).
+    outputSlider.textFromValueFunction = [] (double v)
+    {
+        return v < -60.0 ? juce::String ("-inf") : juce::String (v, 1);
+    };
     addAndMakeVisible (outputSlider);
 
-    outputLabel.setText ("OUTPUT", juce::dontSendNotification);
-    outputLabel.setJustificationType (juce::Justification::centred);
-    outputLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.5f));
-    outputLabel.setFont (juce::FontOptions (11.0f));
+    auto styleSmallKnob = [] (juce::Slider& s)
+    {
+        s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        s.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        s.setRotaryParameters (juce::MathConstants<float>::pi * 1.15f,
+                               juce::MathConstants<float>::pi * 2.85f,
+                               true);
+    };
+    styleSmallKnob (amountSlider);
+    styleSmallKnob (toneSlider);
+    addAndMakeVisible (amountSlider);
+    addAndMakeVisible (toneSlider);
+
+    auto styleKnobLabel = [] (juce::Label& l, const juce::String& text)
+    {
+        l.setText (text, juce::dontSendNotification);
+        l.setJustificationType (juce::Justification::centred);
+        l.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.5f));
+        l.setFont (juce::FontOptions (11.0f));
+    };
+    styleKnobLabel (outputLabel, "OUTPUT");
+    styleKnobLabel (amountLabel, "AMOUNT");
+    styleKnobLabel (toneLabel, "TONE");
     addAndMakeVisible (outputLabel);
+    addAndMakeVisible (amountLabel);
+    addAndMakeVisible (toneLabel);
 
     inMeterLabel.setJustificationType (juce::Justification::centredLeft);
     outMeterLabel.setJustificationType (juce::Justification::centredLeft);
@@ -118,10 +149,12 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     addAndMakeVisible (outMeterLabel);
 
     auto& ap = proc.apvts;
-    presetAtt  = std::make_unique<ComboAttachment> (ap, "preset", presetBox);
-    denoiseAtt = std::make_unique<ButtonAttachment> (ap, "denoise", denoiseBtn);
-    bypassAtt  = std::make_unique<ButtonAttachment> (ap, "bypass", bypassBtn);
-    outputAtt  = std::make_unique<SliderAttachment> (ap, "outputGain", outputSlider);
+    presetAtt      = std::make_unique<ComboAttachment> (ap, "preset", presetBox);
+    denoiseModeAtt = std::make_unique<ComboAttachment> (ap, "denoiseMode", denoiseModeBox);
+    bypassAtt      = std::make_unique<ButtonAttachment> (ap, "bypass", bypassBtn);
+    outputAtt      = std::make_unique<SliderAttachment> (ap, "outputGain", outputSlider);
+    amountAtt      = std::make_unique<SliderAttachment> (ap, "denoiseAmount", amountSlider);
+    toneAtt        = std::make_unique<SliderAttachment> (ap, "tone", toneSlider);
 
     startTimerHz (30);
 }
@@ -141,7 +174,7 @@ void SyncTrackPrepEditor::paint (juce::Graphics& g)
     g.fillAll();
 
     // Card behind knob
-    auto card = juce::Rectangle<float> (24.0f, 100.0f, (float) getWidth() - 48.0f, 220.0f);
+    auto card = juce::Rectangle<float> (24.0f, 132.0f, (float) getWidth() - 48.0f, 220.0f);
     g.setColour (juce::Colour (0xff161920));
     g.fillRoundedRectangle (card, 14.0f);
     g.setColour (juce::Colour (0xff2a303c));
@@ -175,22 +208,40 @@ void SyncTrackPrepEditor::resized()
     auto r = getLocalBounds().reduced (20);
 
     titleLabel.setBounds (r.removeFromTop (28));
-    r.removeFromTop (14);
+    r.removeFromTop (10);
 
-    // Row: Preset label + box | Denoise
+    // Row: Preset label + box | Denoise mode dropdown
     auto row1 = r.removeFromTop (28);
     presetLabel.setBounds (row1.removeFromLeft (48));
-    presetBox.setBounds (row1.removeFromLeft (120));
+    presetBox.setBounds (row1.removeFromLeft (100));
     row1.removeFromLeft (12);
-    denoiseBtn.setBounds (row1.removeFromLeft (100).withSizeKeepingCentre (100, 28));
+    denoiseModeBox.setBounds (row1.removeFromLeft (row1.getWidth()));
 
-    r.removeFromTop (18);
+    r.removeFromTop (6);
+    hqHintLabel.setBounds (r.removeFromTop (16));
 
-    // Knob zone (card interior)
+    r.removeFromTop (6);
+
+    // Knob zone (card interior): one hero knob + two support knobs
     auto knobZone = r.removeFromTop (200);
-    outputSlider.setBounds (knobZone.withSizeKeepingCentre (168, 168));
-    r.removeFromTop (4);
-    outputLabel.setBounds (r.removeFromTop (18));
+    auto knobRow = knobZone.removeFromTop (160);
+    auto labelRow = knobZone.removeFromTop (4 + 18);
+
+    const int outW = 160, amtW = 56, toneW = 96;
+    const int gap = 12;
+    const int rowW = outW + amtW + toneW + 2 * gap;
+    auto knobs = knobRow.withSizeKeepingCentre (rowW, 160);
+    outputSlider.setBounds (knobs.removeFromLeft (outW));
+    knobs.removeFromLeft (gap);
+    amountSlider.setBounds (knobs.removeFromLeft (amtW).withSizeKeepingCentre (amtW, amtW));
+    knobs.removeFromLeft (gap);
+    toneSlider.setBounds (knobs.removeFromLeft (toneW).withSizeKeepingCentre (toneW, toneW));
+
+    outputLabel.setBounds (labelRow.removeFromLeft (outW));
+    labelRow.removeFromLeft (gap);
+    amountLabel.setBounds (labelRow.removeFromLeft (amtW));
+    labelRow.removeFromLeft (gap);
+    toneLabel.setBounds (labelRow.removeFromLeft (toneW));
 
     r.removeFromTop (16);
 
@@ -213,6 +264,8 @@ void SyncTrackPrepEditor::timerCallback()
         inPeakSmooth *= 0.94f;
     if (out < outPeakSmooth * 0.99f)
         outPeakSmooth *= 0.94f;
+
+    hqHintLabel.setVisible (proc.isHqDegraded());
 
     inMeterLabel.setText ({}, juce::dontSendNotification);
     outMeterLabel.setText ({}, juce::dontSendNotification);

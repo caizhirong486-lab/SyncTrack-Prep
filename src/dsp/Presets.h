@@ -2,9 +2,12 @@
 #pragma once
 
 #include "ChannelRepair.h"
+#include "DenoiseStage.h"
 #include "NoiseSuppressor.h"
 #include "Leveler.h"
 #include "PeakCompressor.h"
+#include "ToneShaper.h"
+#include "UpwardExpander.h"
 #include "TruePeakLimiter.h"
 
 /**
@@ -28,6 +31,8 @@ struct Chain
     NoiseSuppressor::Params noiseSuppressor;
     Leveler::Params leveler;
     PeakCompressor::Params peakCompressor;
+    ToneShaper::Params toneShaper;
+    UpwardExpander::Params upwardExpander;
     TruePeakLimiter::Params truePeakLimiter;
 };
 
@@ -41,21 +46,47 @@ inline const char* name (int index)
     }
 }
 
-/** Denoise default for a preset; the user may override it afterwards. */
+/** Denoise default for a preset; the user may override it afterwards.
+    Legacy bool default (clean only) kept for old-state mapping. */
 inline bool denoiseDefault (int index) { return index == clean; }
 
-inline Chain chainFor (int presetIndex, bool denoiseOn)
+/** Denoise mode default for a preset: Strong upgrades to the NN Live engine,
+    Clean keeps the classic spectral denoiser, Soft starts with denoise off. */
+inline DenoiseMode denoiseModeDefault (int index)
+{
+    switch (index)
+    {
+        case strong: return DenoiseMode::live;
+        case clean:  return DenoiseMode::classic;
+        default:     return DenoiseMode::off;
+    }
+}
+
+/** Denoise amount default (%) for a preset; the Amount knob starts here and
+    the user may push it above (the knob's ceiling 100% exceeds every preset).
+    Seeded on the Classic over-subtraction curve; the DFN3 atten-limit mapping
+    may re-tune Strong's default (plan decision 7) — record any change. */
+inline int denoiseAmountDefault (int index)
+{
+    switch (index)
+    {
+        case soft:  return 40;
+        case clean: return 55;
+        default:    return 45;
+    }
+}
+
+inline Chain chainFor (int presetIndex, DenoiseMode mode)
 {
     const int preset = juce::jlimit (0, count - 1, presetIndex);
+    const bool denoiseOn = mode != DenoiseMode::off;
 
     float maxGainDb = 14.0f;
     float maxAttenDb = 10.0f;
     float slowTau = 3.0f;
     float levelStrength = 0.65f;
     float levelGate = -46.0f;
-    float compRatio = 2.5f;
     float compThresh = -6.0f;
-    float denoiseAmount = 0.45f;
 
     if (preset == soft)
     {
@@ -64,9 +95,7 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
         slowTau = 3.5f;
         levelStrength = 0.55f;
         levelGate = -46.0f;
-        compRatio = 2.0f;
         compThresh = -4.0f;
-        denoiseAmount = 0.4f;
     }
     else if (preset == strong)
     {
@@ -75,9 +104,7 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
         slowTau = 2.5f;
         levelStrength = 0.75f;
         levelGate = -48.0f;
-        compRatio = 3.0f;
         compThresh = -6.0f;
-        denoiseAmount = 0.45f;
     }
     else // Clean — denoise carries the noise floor, so the leveler stays light
     {
@@ -86,9 +113,7 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
         slowTau = 4.0f;
         levelStrength = 0.40f;
         levelGate = -42.0f;
-        compRatio = 2.0f;
         compThresh = -5.0f;
-        denoiseAmount = 0.55f; // 0.75 was too aggressive on speech
     }
 
     Chain c;
@@ -99,8 +124,8 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
     c.channelRepair.sideFightRatio = 0.55f;
     c.channelRepair.activityDb = -60.0f;
 
-    c.noiseSuppressor.enabled = denoiseOn;
-    c.noiseSuppressor.amount = denoiseAmount;
+    c.noiseSuppressor.enabled = (mode == DenoiseMode::classic);
+    c.noiseSuppressor.amount = denoiseAmountDefault (preset) / 100.0f;
     c.noiseSuppressor.hpfHz = 70.0f;
     // Soft spectral subtraction + strong speech-band protect (anti-distortion)
     c.noiseSuppressor.overSubtract = denoiseOn ? (preset == clean ? 1.05f : 1.0f) : 1.0f;
@@ -119,10 +144,22 @@ inline Chain chainFor (int presetIndex, bool denoiseOn)
 
     c.peakCompressor.enabled = true; // always-on safety
     c.peakCompressor.strength = 1.0f;
-    c.peakCompressor.ratio = compRatio;
-    c.peakCompressor.thresholdDb = compThresh;
-    c.peakCompressor.attackMs = 3.0f;
-    c.peakCompressor.releaseMs = 100.0f;
+    c.peakCompressor.ratio = 2.0f;      // gentle glue, 2:1 across presets
+    c.peakCompressor.thresholdDb = compThresh; // fallback only; the scene-coupled threshold rides above/below
+    c.peakCompressor.attackMs = 15.0f;  // soft-knee feel; the limiter catches true transients
+    c.peakCompressor.releaseMs = 120.0f;
+    c.peakCompressor.sceneOffsetDb = -4.0f;
+    c.peakCompressor.transientReleaseMs = 40.0f;
+
+    c.toneShaper.enabled = true;
+    c.toneShaper.tone = 0.0f;
+
+    c.upwardExpander.enabled = true;
+    c.upwardExpander.ratio = 1.5f;
+    c.upwardExpander.rangeDb = 8.0f;   // Step 5 control experiment may converge to 0
+    c.upwardExpander.attackMs = 5.0f;
+    c.upwardExpander.releaseMs = 150.0f;
+    c.upwardExpander.sceneOffsetDb = -20.0f;
 
     c.truePeakLimiter.enabled = true;
     c.truePeakLimiter.ceilingDb = -1.0f;

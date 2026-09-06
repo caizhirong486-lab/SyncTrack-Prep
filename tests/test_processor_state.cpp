@@ -39,6 +39,13 @@ float getFloat (juce::AudioProcessorValueTreeState& apvts, const char* id)
     REQUIRE (p != nullptr);
     return p->convertFrom0to1 (p->getValue());
 }
+
+void setFloat (juce::AudioProcessorValueTreeState& apvts, const char* id, float value)
+{
+    auto* p = apvts.getParameter (id);
+    REQUIRE (p != nullptr);
+    p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
 }
 
 TEST_CASE ("State round-trip keeps a manual denoise choice", "[state]")
@@ -114,32 +121,118 @@ TEST_CASE ("Switching preset still applies its denoise default", "[state]")
     juce::ScopedJuceInitialiser_GUI juceInit;
 
     SyncTrackPrepProcessor p;
-    setChoice (p.apvts, "preset", 0);
+    setChoice (p.apvts, "preset", 0); // Soft
+    REQUIRE (getChoice (p.apvts, "denoiseMode") == (int) DenoiseMode::off);
     REQUIRE (! getBool (p.apvts, "denoise"));
 
-    setChoice (p.apvts, "preset", 2); // Clean
+    setChoice (p.apvts, "preset", 2); // Clean -> classic spectral denoiser
+    REQUIRE (getChoice (p.apvts, "denoiseMode") == (int) DenoiseMode::classic);
     REQUIRE (getBool (p.apvts, "denoise"));
 
-    setChoice (p.apvts, "preset", 1); // Strong
-    REQUIRE (! getBool (p.apvts, "denoise"));
+    setChoice (p.apvts, "preset", 1); // Strong -> NN Live engine
+    REQUIRE (getChoice (p.apvts, "denoiseMode") == (int) DenoiseMode::live);
+    REQUIRE (getBool (p.apvts, "denoise"));
 }
 
+TEST_CASE ("Mode round-trip and legacy-bool key precedence", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
 
-TEST_CASE ("Reported latency is fixed while Denoise toggles", "[state]")
+    // A saved Classic session must stay Classic even though the mirrored
+    // legacy bool reads "on" — the denoiseMode key takes precedence.
+    juce::MemoryBlock saved;
+    {
+        SyncTrackPrepProcessor src;
+        setChoice (src.apvts, "preset", 1);
+        setChoice (src.apvts, "denoiseMode", (int) DenoiseMode::classic);
+        src.getStateInformation (saved);
+    }
+    SyncTrackPrepProcessor dst;
+    dst.setStateInformation (saved.getData(), (int) saved.getSize());
+    REQUIRE (getChoice (dst.apvts, "denoiseMode") == (int) DenoiseMode::classic);
+
+    // Strip denoiseMode -> true legacy state: bool on maps to Live (upgrade
+    // mapping), bool off maps to Off.
+    auto makeLegacy = [] (const juce::MemoryBlock& block, bool on) -> juce::MemoryBlock
+    {
+        auto xml = juce::AudioProcessor::getXmlFromBinary (block.getData(), (int) block.getSize());
+        REQUIRE (xml != nullptr);
+        bool removed = false;
+        while (auto* modeChild = xml->getChildByAttribute ("id", juce::String ("denoiseMode")))
+        {
+            xml->removeChildElement (modeChild, true);
+            removed = true;
+        }
+        REQUIRE (removed);
+        if (auto* denoiseChild = xml->getChildByAttribute ("id", juce::String ("denoise")))
+            denoiseChild->setAttribute ("value", on ? juce::String ("1") : juce::String ("0"));
+        INFO ("denoise attr now: "
+              << (xml->getChildByAttribute ("id", juce::String ("denoise"))
+                      ? xml->getChildByAttribute ("id", juce::String ("denoise"))->getStringAttribute ("value")
+                      : juce::String ("<missing>")));
+        juce::MemoryBlock out;
+        juce::AudioProcessor::copyXmlToBinary (*xml, out);
+        auto reparsed = juce::AudioProcessor::getXmlFromBinary (out.getData(), (int) out.getSize());
+        CHECK (reparsed != nullptr);
+        CHECK (reparsed->getChildByAttribute ("id", juce::String ("denoiseMode")) == nullptr);
+        return out;
+    };
+
+    auto legacyOn = makeLegacy (saved, true);
+    SyncTrackPrepProcessor legacyLoader;
+    legacyLoader.setStateInformation (legacyOn.getData(), (int) legacyOn.getSize());
+    REQUIRE (getChoice (legacyLoader.apvts, "denoiseMode") == (int) DenoiseMode::live);
+    REQUIRE (getBool (legacyLoader.apvts, "denoise"));
+
+    auto legacyOff = makeLegacy (saved, false);
+    SyncTrackPrepProcessor legacyOffLoader;
+    legacyOffLoader.setStateInformation (legacyOff.getData(), (int) legacyOff.getSize());
+    INFO ("after legacy-off load: mode idx " << getChoice (legacyOffLoader.apvts, "denoiseMode")
+          << ", bool " << (int) getBool (legacyOffLoader.apvts, "denoise"));
+    CHECK (getChoice (legacyOffLoader.apvts, "denoiseMode") == (int) DenoiseMode::off);
+    CHECK (! getBool (legacyOffLoader.apvts, "denoise"));
+}
+
+TEST_CASE ("Output range: 0 dB sits at the normalised centre", "[state]")
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
     SyncTrackPrepProcessor p;
+    auto* gain = p.apvts.getParameter ("outputGain");
+    REQUIRE (gain != nullptr);
+    REQUIRE (std::abs (gain->convertTo0to1 (0.0f) - 0.5f) < 1.0e-3f);
+    REQUIRE (std::abs (gain->convertFrom0to1 (0.5f)) < 0.05f);
+}
+
+
+TEST_CASE ("Reported latency is fixed between Off and Classic", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::off);
     p.prepareToPlay (48000.0, 512);
 
+    juce::MidiBuffer midi;
+    juce::AudioBuffer<float> probe (2, 512);
+    auto runOneBlock = [&]
+    {
+        probe.clear();
+        p.processBlock (probe, midi);
+        p.flushPendingLatency();
+    };
+
+    runOneBlock();
     const int latOff = p.getLatencySamples();
-    setBool (p.apvts, "denoise", true);
-    const int latOn = p.getLatencySamples();
-    setBool (p.apvts, "denoise", false);
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::classic);
+    runOneBlock();
+    const int latClassic = p.getLatencySamples();
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::off);
+    runOneBlock();
     const int latOffAgain = p.getLatencySamples();
 
-    INFO ("latency off " << latOff << " / on " << latOn << " / off " << latOffAgain);
-    REQUIRE (latOn == latOff);
+    INFO ("latency off " << latOff << " / classic " << latClassic << " / off " << latOffAgain);
+    REQUIRE (latClassic == latOff);
     REQUIRE (latOffAgain == latOff);
     // Denoise STFT delay (511) + limiter look-ahead (64).
     REQUIRE (latOff == NoiseSuppressor::latencyWhenEnabled + TruePeakLimiter::lookaheadSamples);
@@ -208,7 +301,8 @@ TEST_CASE ("Output +12 dB is clamped by the safety chain", "[state][truepeak]")
 
     SyncTrackPrepProcessor p;
     p.prepareToPlay (48000.0, 512);
-    setChoice (p.apvts, "preset", 1); // Strong, denoise off
+    setChoice (p.apvts, "preset", 1);
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::off); // dry safety chain
 
     auto* gain = p.apvts.getParameter ("outputGain");
     REQUIRE (gain != nullptr);
@@ -222,10 +316,12 @@ TEST_CASE ("Output +12 dB is clamped by the safety chain", "[state][truepeak]")
     SyncTrackPrepProcessor p2;
     p2.prepareToPlay (48000.0, 512);
     setChoice (p2.apvts, "preset", 1);
+    setChoice (p2.apvts, "denoiseMode", (int) DenoiseMode::off);
     auto* gain2 = p2.apvts.getParameter ("outputGain");
     REQUIRE (gain2 != nullptr);
     gain2->setValueNotifyingHost (gain2->convertTo0to1 (12.0f));
     const auto out12 = runProcessor (p2, input);
+    p.flushPendingLatency();
 
     const float tp = measureTruePeakDb (out12, 48000.0);
     INFO ("output +12 dB true peak " << tp << " dBTP");
@@ -270,4 +366,55 @@ TEST_CASE ("Re-selecting the same preset keeps the manual denoise choice", "[sta
     setBool (p.apvts, "denoise", false);
     setChoice (p.apvts, "preset", 2); // same preset again -> keeps off
     REQUIRE (! getBool (p.apvts, "denoise"));
+}
+
+TEST_CASE ("State round-trip keeps amount and tone knobs", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    juce::MemoryBlock saved;
+    {
+        SyncTrackPrepProcessor src;
+        setChoice (src.apvts, "preset", 1);
+        setFloat (src.apvts, "denoiseAmount", 72.0f);
+        setFloat (src.apvts, "tone", -0.4f);
+        src.getStateInformation (saved);
+    }
+
+    SyncTrackPrepProcessor dst;
+    dst.setStateInformation (saved.getData(), (int) saved.getSize());
+
+    REQUIRE (std::abs (getFloat (dst.apvts, "denoiseAmount") - 72.0f) < 0.05f);
+    REQUIRE (std::abs (getFloat (dst.apvts, "tone") - (-0.4f)) < 0.005f);
+}
+
+TEST_CASE ("Switching preset applies its amount default", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 45.0f) < 0.05f); // Strong seed
+
+    setChoice (p.apvts, "preset", 0); // Soft
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 40.0f) < 0.05f);
+
+    setChoice (p.apvts, "preset", 2); // Clean
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 55.0f) < 0.05f);
+}
+
+TEST_CASE ("Re-selecting the same preset keeps a manual amount", "[state]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    setChoice (p.apvts, "preset", 1);
+    setFloat (p.apvts, "denoiseAmount", 80.0f); // user pushes the knob
+
+    // Same preset again is not a gesture.
+    setChoice (p.apvts, "preset", 1);
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 80.0f) < 0.05f);
+
+    // A real switch reseeds the default.
+    setChoice (p.apvts, "preset", 0);
+    REQUIRE (std::abs (getFloat (p.apvts, "denoiseAmount") - 40.0f) < 0.05f);
 }

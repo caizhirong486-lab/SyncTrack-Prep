@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include "dsp/Presets.h"
+#include "dsp/ClassicDenoise.h"
 #include <cmath>
 #include <random>
+#include <cstdlib>
 
 namespace
 {
@@ -27,24 +29,33 @@ juce::AudioBuffer<float> makeSignal (int numSamples)
 
 /** Runs one chain over the whole buffer using a fixed block size. Modules keep
     state across blocks, so the block size must not change the result. */
-juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int block, int preset, bool denoise)
+juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int block, int preset, DenoiseMode mode, float tone = 0.0f)
 {
     juce::AudioBuffer<float> buf (input);
     juce::dsp::ProcessSpec spec { sr, (juce::uint32) block, (juce::uint32) buf.getNumChannels() };
 
     ChannelRepair cr;
-    NoiseSuppressor ns;
+    ClassicDenoise denoiseStage;
     Leveler lv;
     PeakCompressor pc;
+    ToneShaper ts;
+    UpwardExpander ue;
     TruePeakLimiter tp;
-    cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec); tp.prepare (spec);
+    cr.prepare (spec); denoiseStage.prepare (sr, 512, 2); lv.prepare (spec); pc.prepare (spec);
+    ts.prepare (spec); ue.prepare (spec); tp.prepare (spec);
 
-    const auto chain = Presets::chainFor (preset, denoise);
+    auto chain = Presets::chainFor (preset, mode);
+    chain.toneShaper.tone = tone;
     cr.setParams (chain.channelRepair);
-    ns.setParams (chain.noiseSuppressor);
+    denoiseStage.setClassicParams (chain.noiseSuppressor);
     lv.setParams (chain.leveler);
     pc.setParams (chain.peakCompressor);
+    ts.setParams (chain.toneShaper);
+    ue.setParams (chain.upwardExpander);
     tp.setParams (chain.truePeakLimiter);
+    // Continuous per-sample scene level, no output gain offline.
+    pc.bindSceneSource (&lv.sceneStream());
+    ue.bindSceneSource (&lv.sceneStream());
 
     for (int off = 0; off < buf.getNumSamples(); off += block)
     {
@@ -55,9 +66,13 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& input, int bloc
 
         cr.process (slice);
         lv.process (slice);
-        ns.process (slice);
-        pc.process (slice);
-        tp.process (slice);
+        denoiseStage.process (slice);
+        if (std::getenv ("STP_SKIP_TS") == nullptr) ts.process (slice);
+        ue.setSceneLevelDb (0.0f);
+        if (std::getenv ("STP_SKIP_UE") == nullptr) ue.process (slice);
+        pc.setSceneLevelDb (0.0f);
+        if (std::getenv ("STP_SKIP_PC") == nullptr) pc.process (slice);
+        if (std::getenv ("STP_SKIP_TP") == nullptr) tp.process (slice);
 
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
             buf.copyFrom (ch, off, slice, ch, 0, n);
@@ -84,14 +99,14 @@ TEST_CASE ("Chain output is independent of host block size", "[blocksize]")
     // has no test that can catch it.
     const auto input = makeSignal ((int) sr * 4);
 
-    for (bool denoise : { false, true })
+    for (DenoiseMode mode : { DenoiseMode::off, DenoiseMode::classic })
     {
-        const auto reference = render (input, 512, Presets::strong, denoise);
+        const auto reference = render (input, 512, Presets::strong, mode);
         for (int block : { 32, 64, 128, 480, 1024, 2048 })
         {
-            const auto other = render (input, block, Presets::strong, denoise);
+            const auto other = render (input, block, Presets::strong, mode);
             const float diff = maxAbsDiff (reference, other);
-            INFO ("denoise " << (int) denoise << ", block " << block << ", max diff " << diff);
+            INFO ("mode " << (int) mode << ", block " << block << ", max diff " << diff);
             REQUIRE (diff < 1.0e-6f);
         }
     }
@@ -190,4 +205,20 @@ TEST_CASE ("Denoise disabled is a pure delay, unchanged audio", "[denoise]")
         for (int i = latency; i < n; ++i)
             worst = juce::jmax (worst, std::abs (out.getSample (ch, i) - input.getSample (ch, i - latency)));
     REQUIRE (worst == 0.0f);
+}
+
+TEST_CASE ("ToneShaped chain is independent of host block size", "[blocksize][tone]")
+{
+    // The ToneShaper's biquad state must carry across blocks exactly like the
+    // other stages, including a live tone setting (not the transparent zero).
+    const auto input = makeSignal ((int) sr * 4);
+
+    const auto reference = render (input, 512, Presets::strong, DenoiseMode::off, 0.8f);
+    for (int block : { 64, 333, 1024 })
+    {
+        const auto other = render (input, block, Presets::strong, DenoiseMode::off, 0.8f);
+        const float diff = maxAbsDiff (reference, other);
+        INFO ("block " << block << ", max diff " << diff);
+        REQUIRE (diff < 1.0e-6f);
+    }
 }

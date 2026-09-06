@@ -91,9 +91,14 @@ void NoiseSuppressor::spectralGain()
 {
     const float amount = juce::jlimit (0.0f, 1.0f, params.amount);
     // Softer curve: Wiener-like, less musical noise / less speech chew
-    const float over = params.overSubtract * (0.35f + 0.55f * amount);
+    const float over = params.overSubtract * (0.35f + 0.55f * amount)
+                     + params.overSubtract * 0.60f * juce::jmax (0.0f, amount - 0.55f);
     const float floorBase = 0.18f + 0.35f * (1.0f - amount); // never crush to silence
     const float protect = juce::jlimit (0.0f, 1.0f, params.speechProtect);
+    // Above the preset range (~0.40-0.55) the speech-band protection recedes,
+    // so the Amount knob's top half genuinely digs deeper instead of being
+    // clamped by the protection floor. Preset defaults stay untouched.
+    const float protectScale = 1.0f - 0.65f * juce::jmax (0.0f, amount - 0.55f) / 0.45f;
     const float smooth = 0.35f; // temporal gain smooth
 
     auto applyBin = [&] (int bin, float& re, float& im)
@@ -133,10 +138,10 @@ void NoiseSuppressor::spectralGain()
         else if (f > 4000.0f && f < 6000.0f)
             speechW = 1.0f - (f - 4000.0f) / 2000.0f;
 
-        const float floorG = floorBase + protect * speechW * 0.35f; // higher floor in speech
+        const float floorG = floorBase + protect * protectScale * speechW * 0.35f; // higher floor in speech
         g = juce::jmax (g, floorG);
         // Blend toward unity in speech band so amount can't fully strip vowels
-        g = g + protect * speechW * (1.0f - g) * 0.45f;
+        g = g + protect * protectScale * speechW * (1.0f - g) * 0.45f;
 
         // Temporal smooth
         float& gs = gainSmooth[(size_t) bin];

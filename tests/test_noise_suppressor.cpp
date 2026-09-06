@@ -259,3 +259,49 @@ TEST_CASE ("Denoise learns a noise floor that appears mid-stream", "[denoise]")
     const float lateDb = juce::Decibels::gainToDecibels (late / juce::jmax (in, 1.0e-9f));
     REQUIRE (lateDb <= -4.0f);  // estimate engaged within ~3 s of the noise
 }
+
+TEST_CASE ("Amount knob top range digs deeper than the preset range", "[denoise]")
+{
+    // The grey-test complaint was "a little, and not adjustable": above the
+    // preset range (0.40-0.55) the speech-band protection must recede so the
+    // knob's top half removes measurably more steady noise.
+    auto steadyNoiseRms = [] (float amount)
+    {
+        NoiseSuppressor ns;
+        juce::dsp::ProcessSpec spec { 48000.0, 256, 2 };
+        ns.prepare (spec);
+        NoiseSuppressor::Params p;
+        p.enabled = true;
+        p.amount = amount;
+        p.hpfHz = 40.0f;
+        p.speechProtect = 0.65f; // Strong preset value
+        ns.setParams (p);
+
+        std::mt19937 rng (31);
+        std::normal_distribution<float> dist (0.0f, 0.03f);
+        juce::AudioBuffer<float> buf (2, 48000 * 3);
+        for (int i = 0; i < buf.getNumSamples(); ++i)
+        {
+            const float n = dist (rng);
+            buf.setSample (0, i, n);
+            buf.setSample (1, i, n);
+        }
+
+        const int block = 256;
+        for (int off = 0; off + block <= buf.getNumSamples(); off += block)
+        {
+            juce::AudioBuffer<float> slice (2, block);
+            slice.copyFrom (0, 0, buf, 0, off, block);
+            slice.copyFrom (1, 0, buf, 1, off, block);
+            ns.process (slice);
+            buf.copyFrom (0, off, slice, 0, 0, block);
+            buf.copyFrom (1, off, slice, 1, 0, block);
+        }
+        return buf.getRMSLevel (0, 48000 * 2, 48000);
+    };
+
+    const float presetRange = steadyNoiseRms (0.45f);
+    const float topRange = steadyNoiseRms (1.0f);
+    INFO ("amount 45% rms " << presetRange << ", 100% rms " << topRange);
+    REQUIRE (topRange < presetRange * 0.75f); // at least ~2.5 dB deeper
+}

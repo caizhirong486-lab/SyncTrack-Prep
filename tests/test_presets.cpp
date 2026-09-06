@@ -29,7 +29,7 @@ juce::AudioBuffer<float> makeTestSignal()
     return buf;
 }
 
-juce::AudioBuffer<float> renderPreset (const juce::AudioBuffer<float>& input, int preset, bool denoise, int block = 512)
+juce::AudioBuffer<float> renderPreset (const juce::AudioBuffer<float>& input, int preset, DenoiseMode mode, int block = 512)
 {
     juce::AudioBuffer<float> buf (input);
     juce::dsp::ProcessSpec spec { sr, (juce::uint32) block, (juce::uint32) buf.getNumChannels() };
@@ -41,7 +41,7 @@ juce::AudioBuffer<float> renderPreset (const juce::AudioBuffer<float>& input, in
     TruePeakLimiter tp;
     cr.prepare (spec); ns.prepare (spec); lv.prepare (spec); pc.prepare (spec); tp.prepare (spec);
 
-    const auto chain = Presets::chainFor (preset, denoise);
+    const auto chain = Presets::chainFor (preset, mode);
     cr.setParams (chain.channelRepair);
     ns.setParams (chain.noiseSuppressor);
     lv.setParams (chain.leveler);
@@ -85,9 +85,9 @@ TEST_CASE ("Presets produce distinguishable output", "[presets]")
     // same render. test5 shipped three "presets" that were bit-identical.
     const auto input = makeTestSignal();
 
-    const auto soft = renderPreset (input, Presets::soft, Presets::denoiseDefault (Presets::soft));
-    const auto strong = renderPreset (input, Presets::strong, Presets::denoiseDefault (Presets::strong));
-    const auto clean = renderPreset (input, Presets::clean, Presets::denoiseDefault (Presets::clean));
+    const auto soft = renderPreset (input, Presets::soft, Presets::denoiseModeDefault (Presets::soft));
+    const auto strong = renderPreset (input, Presets::strong, Presets::denoiseModeDefault (Presets::strong));
+    const auto clean = renderPreset (input, Presets::clean, Presets::denoiseModeDefault (Presets::clean));
 
     REQUIRE_FALSE (bitIdentical (soft, strong));
     REQUIRE_FALSE (bitIdentical (soft, clean));
@@ -106,8 +106,8 @@ TEST_CASE ("Strong lifts quiet material more than Clean", "[presets]")
     // Encodes the design intent of the table: Strong chases scene loudness,
     // Clean stays light so it does not amplify the residual noise floor.
     const auto input = makeTestSignal();
-    const auto strong = renderPreset (input, Presets::strong, false);
-    const auto clean = renderPreset (input, Presets::clean, false);
+    const auto strong = renderPreset (input, Presets::strong, DenoiseMode::off);
+    const auto clean = renderPreset (input, Presets::clean, DenoiseMode::off);
 
     auto rmsOf = [] (const juce::AudioBuffer<float>& b, int start, int len)
     {
@@ -124,4 +124,37 @@ TEST_CASE ("Strong lifts quiet material more than Clean", "[presets]")
 
     INFO ("strong " << strongDb << " dB vs clean " << cleanDb << " dB");
     REQUIRE (strongDb > cleanDb + 1.0f);
+}
+
+TEST_CASE ("Denoise amount defaults and warm-dynamics compressor constants", "[presets]")
+{
+    REQUIRE (Presets::denoiseAmountDefault (Presets::soft) == 40);
+    REQUIRE (Presets::denoiseAmountDefault (Presets::strong) == 45);
+    REQUIRE (Presets::denoiseAmountDefault (Presets::clean) == 55);
+
+    REQUIRE (Presets::denoiseModeDefault (Presets::soft) == DenoiseMode::off);
+    REQUIRE (Presets::denoiseModeDefault (Presets::strong) == DenoiseMode::live);
+    REQUIRE (Presets::denoiseModeDefault (Presets::clean) == DenoiseMode::classic);
+
+    for (int i = 0; i < Presets::count; ++i)
+    {
+        const auto chain = Presets::chainFor (i, Presets::denoiseModeDefault (i));
+        REQUIRE (chain.peakCompressor.ratio == 2.0f);
+        REQUIRE (chain.peakCompressor.attackMs == 15.0f);
+        REQUIRE (chain.peakCompressor.releaseMs == 120.0f);
+        REQUIRE (chain.peakCompressor.sceneOffsetDb == -4.0f);
+        REQUIRE (chain.toneShaper.enabled);
+        REQUIRE (chain.toneShaper.tone == 0.0f);
+        REQUIRE (std::abs (chain.noiseSuppressor.amount
+                           - (float) Presets::denoiseAmountDefault (i) / 100.0f) < 1.0e-4f);
+        REQUIRE (chain.upwardExpander.enabled);
+        REQUIRE (chain.upwardExpander.ratio == 1.5f);
+        REQUIRE (chain.upwardExpander.rangeDb == 8.0f);
+        REQUIRE (chain.upwardExpander.sceneOffsetDb == -20.0f);
+    }
+
+    REQUIRE (Presets::chainFor (Presets::strong, DenoiseMode::classic)
+                 .noiseSuppressor.enabled);
+    REQUIRE (! Presets::chainFor (Presets::strong, DenoiseMode::live)
+                  .noiseSuppressor.enabled);
 }

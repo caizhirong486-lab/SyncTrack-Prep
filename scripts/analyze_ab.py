@@ -103,6 +103,35 @@ def parse_window(spec: str) -> tuple[float, float]:
     return float(start), float(end)
 
 
+def percentile(xs: list[float], p: float) -> float:
+    """Linear-interpolated percentile of a non-empty list, p in [0, 100]."""
+    if not xs:
+        return float("nan")
+    s = sorted(xs)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * (p / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    frac = k - lo
+    return s[lo] * (1.0 - frac) + s[hi] * frac
+
+
+def frame_rms_db(
+    L: list[float], R: list[float], sr: int, a: int, b: int,
+    frame_s: float = 0.05, hop_s: float = 0.025,
+) -> list[float]:
+    """Mono-equivalent RMS in dB over 50 ms frames, 25 ms hop, in [a, b)."""
+    frame = max(1, int(frame_s * sr))
+    hop = max(1, int(hop_s * sr))
+    out: list[float] = []
+    pos = a
+    while pos + frame <= b:
+        out.append(rms_window_db(L, R, pos, pos + frame))
+        pos += hop
+    return out
+
+
 def rms(xs: list[float]) -> float:
     if not xs:
         return 0.0
@@ -154,6 +183,10 @@ def analyze(
     tp_ceiling: float = -1.0,
     preset: str | None = None,
     noise_target: float = -5.0,
+    window: tuple[float, float] | None = None,
+    trim_end: float = 0.0,
+    proc_trim_start: float = 0.0,
+    exclude_silence_db: float = -100.0,
 ) -> Path:
     gL, gR, sr = load_mono_stereo(gold)
     pL, pR, _ = load_mono_stereo(proc)
@@ -265,6 +298,33 @@ def analyze(
     gold_tp = true_peak_db(gold)
     proc_tp = true_peak_db(proc)
 
+    # --- v3 protocol: percentile dynamics (50 ms frames, 25 ms hop) ---
+    # Measured over an explicit window (default: whole file) minus the
+    # trailing flush (trim_end) and, on the processed side, the leading
+    # NN-priming silence (proc_trim_start): both are digital-silence regions
+    # that would drag p10 to the floor, so any comparison must trim them and
+    # the gold window shrinks by the same span to keep the material aligned.
+    dyn_w0 = int(max(0.0, window[0] if window else 0.0) * sr)
+    dyn_end = min(window[1], n / sr - trim_end) if window else (n / sr - trim_end)
+    dyn_w1 = min(n, int(dyn_end * sr))
+    p_head = int(min(proc_trim_start, max(0.0, dyn_end - (window[0] if window else 0.0))) * sr)
+    if dyn_w1 <= dyn_w0:
+        dyn_w0, dyn_w1 = 0, 0
+    g_frames = frame_rms_db(gL, gR, sr, dyn_w0, max(dyn_w0, dyn_w1 - p_head))
+    p_frames = frame_rms_db(pL, pR, sr, dyn_w0 + p_head, dyn_w1)
+    if exclude_silence_db > -99.0:
+        # Digital-silence events in the source (stream mutes) would pin every
+        # percentile to the dB floor; drop frames below the threshold from
+        # BOTH sides so the percentiles describe the audible noise floor.
+        g_frames = [f for f in g_frames if f > exclude_silence_db]
+        p_frames = [f for f in p_frames if f > exclude_silence_db]
+    g_p10 = percentile(g_frames, 10)
+    g_p25 = percentile(g_frames, 25)
+    g_p95 = percentile(g_frames, 95)
+    p_p10 = percentile(p_frames, 10)
+    p_p25 = percentile(p_frames, 25)
+    p_p95 = percentile(p_frames, 95)
+
     def rnd(x: float) -> float | str:
         return "" if isinstance(x, float) and math.isnan(x) else round(x, 3)
 
@@ -303,6 +363,19 @@ def analyze(
         "gold_true_peak_dbtp": rnd(gold_tp),
         "proc_true_peak_dbtp": rnd(proc_tp),
         "tp_ceiling_dbtp": tp_ceiling,
+        "dyn_window_s": f"{dyn_w0 / sr:.3f}:{dyn_w1 / sr:.3f}",
+        "dyn_trim_end_s": trim_end,
+        "dyn_proc_trim_start_s": proc_trim_start,
+        "dyn_exclude_silence_db": exclude_silence_db,
+        "dyn_frames": len(g_frames),
+        "gold_p10_db": rnd(g_p10),
+        "gold_p25_db": rnd(g_p25),
+        "gold_p95_db": rnd(g_p95),
+        "gold_dyn_p95_p25": rnd(g_p95 - g_p25),
+        "proc_p10_db": rnd(p_p10),
+        "proc_p25_db": rnd(p_p25),
+        "proc_p95_db": rnd(p_p95),
+        "proc_dyn_p95_p25": rnd(p_p95 - p_p25),
         "pass_channel_repair": p_modes.get("left_only", 0) <= max(1, g_modes.get("left_only", 0) // 5),
         "pass_soft_boost": (mean([r["delta_rms_db"] for r in soft]) > 2.0) if soft else False,
         "pass_no_crackle": sum(r["proc_jumps"] for r in rows) < sum(r["gold_jumps"] for r in rows) + 50
@@ -382,6 +455,18 @@ def analyze(
         f"| Mode gold | {dict(g_modes)} |",
         f"| Mode proc | {dict(p_modes)} |",
         "",
+        "## Percentile dynamics (v3 protocol: 50 ms frames, 25 ms hop)",
+        "",
+        f"Window `{overview['dyn_window_s']}` s, trailing flush trimmed {overview['dyn_trim_end_s']} s, "
+        f"{overview['dyn_frames']} frames.",
+        "",
+        f"| Metric | gold | proc |",
+        f"|---|---:|---:|",
+        f"| p10 (noise floor) | {overview['gold_p10_db']} | {overview['proc_p10_db']} |",
+        f"| p25 | {overview['gold_p25_db']} | {overview['proc_p25_db']} |",
+        f"| p95 | {overview['gold_p95_db']} | {overview['proc_p95_db']} |",
+        f"| p95 − p25 (dynamics) | {overview['gold_dyn_p95_p25']} | {overview['proc_dyn_p95_p25']} |",
+        "",
         "## Per-second (excerpt: non-silence)",
         "",
         "| sec | gold mode | proc mode | gold RMS | proc RMS | ΔRMS | gold bal | proc bal | jumps g→p |",
@@ -430,6 +515,25 @@ def analyze(
         )
     with index.open("a", encoding="utf-8") as f:
         f.write(entry)
+
+    dyn_index = out_dir / "INDEX_dynamic.md"
+    dyn_entry = (
+        f"| {overview['timestamp_utc']} | `{run_id}` | "
+        f"{overview['gold_p10_db']} | {overview['proc_p10_db']} | "
+        f"{overview['gold_dyn_p95_p25']} | {overview['proc_dyn_p95_p25']} | "
+        f"{overview['dyn_window_s']} | {overview['dyn_trim_end_s']} | "
+        f"{notes.replace('|', '/')} |\n"
+    )
+    if not dyn_index.exists():
+        dyn_index.write_text(
+            "# Dynamic-percentile index (v3 protocol: 50 ms frames, 25 ms hop)\n\n"
+            "| UTC | run_id | gold p10 | proc p10 | gold p95−p25 | proc p95−p25 "
+            "| window s | trim end s | notes |\n"
+            "|---|---|---:|---:|---:|---:|---|---:|---|\n",
+            encoding="utf-8",
+        )
+    with dyn_index.open("a", encoding="utf-8") as f:
+        f.write(dyn_entry)
 
     print(f"Wrote {summary_csv}")
     print(f"Wrote {overview_csv}")
@@ -486,6 +590,36 @@ def main() -> int:
         help="Metric C target in dB vs source (default -5; -4 leaves too little "
         "room for real-material drift)",
     )
+    ap.add_argument(
+        "--window",
+        default=None,
+        help="Percentile-dynamics window in relative seconds START:END "
+        "(default: whole file)",
+    )
+    ap.add_argument(
+        "--exclude-silence-db",
+        type=float,
+        default=-100.0,
+        help="Drop percentile frames below this dB (both sides) so source "
+        "digital-silence events cannot pin p10 to the floor; "
+        "pass -100 to keep every frame (default -100 = keep all)",
+    )
+    ap.add_argument(
+        "--proc-trim-start",
+        type=float,
+        default=0.0,
+        help="Seconds of leading NN-priming silence to exclude from the "
+        "processed side of the percentile window (the gold window shrinks "
+        "by the same span to keep material aligned; default 0)",
+    )
+    ap.add_argument(
+        "--trim-end",
+        type=float,
+        default=0.0,
+        help="Seconds to exclude from the end of the percentile window; "
+        "HQ renders append a ~4 s near-silent flush that must be trimmed "
+        "(default 0)",
+    )
     args = ap.parse_args()
     if not args.gold.exists():
         print(f"missing gold: {args.gold}", file=sys.stderr)
@@ -505,6 +639,10 @@ def main() -> int:
         tp_ceiling=args.tp_ceiling,
         preset=args.preset,
         noise_target=args.noise_target,
+        window=parse_window(args.window) if args.window else None,
+        trim_end=args.trim_end,
+        proc_trim_start=args.proc_trim_start,
+        exclude_silence_db=args.exclude_silence_db,
     )
     return 0
 
