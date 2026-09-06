@@ -17,11 +17,12 @@
 ### 信号链
 
 ```
-In → ChannelRepair → Leveler → HPF → NoiseSuppressor → OutputGain → PeakCompressor → TruePeakLimiter → Out
+In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain → UpwardExpander → PeakCompressor → TruePeakLimiter → Out
 ```
 
-* **固定延迟 575 samples**（降噪 STFT 511 + 限制器前视 64）。在 `prepareToPlay` 时上报一次；**切换 Denoise 不会改变延迟**，所以宿主的延迟补偿始终有效。
-* Leveler 故意放在降噪**之前**：这样频谱级可以把 Leveler 刚抬起来的底噪再刮掉一层（**Clean** 预设就是靠这个逻辑）。
+* **DenoiseStage** 通过 **Denoise Mode** 下拉选择：**Off**（不抑制）、**Classic**（自研频谱 STFT/OLA，延迟 575）、**Live (DFN3)**（DeepFilterNet3 / libDF，实时，约 30 ms）、**HQ (MossFormer2)**（MossFormer2_SE_48K + ONNX Runtime，仅离线渲染，4 秒前瞻）。延迟按模式上报，宿主据此补偿。
+* Leveler 故意放在降噪**之前**：让选中的降噪引擎能把刚被抬起来的安静段底噪再刮掉一层。
+* Leveler 发布每个采样后的 *scene level*，压缩器和向上扩展器都按这个采样级联 —— 动态跟随的是听者实际听到的电平，而不是输入端的快照。
 * **Output 是整条链的补偿增益（makeup gain）**，位置在常开的安全级**之前**。因此 −1 dBTP 天花板在**任何**旋钮位置都成立：Output 往上推会把安静段抬到贴近天花板，任何试图越过天花板的部分都会被压缩器和限制器压回来。旋钮在 0 dB 时，整条链的行为跟没有这个旋钮一样。
 
 ### 术语
@@ -31,10 +32,12 @@ In → ChannelRepair → Leveler → HPF → NoiseSuppressor → OutputGain → 
 | **同期声（Production track）** | 导入的视频同期音频：对白与现场音效混在一起。 |
 | **声道修复（Channel repair）** | 修正错误的声道布局，以及长时间的 L/R 能量失衡。 |
 | **L-only / R-only** | 一个声道低于活动阈值、另一个有内容 —— 视为"单声道停在一侧"。 |
-| **Leveler** | 慢速自动增益，把有内容的部分拉向目标响度区间（−18 dB）。 |
+| **Leveler** | 慢速自动增益，把有内容的部分拉向目标响度区间（−18 dB）。每个采样后输出一条 scene level，下游动态（压缩器、扩展器）都按这个采样级联。 |
 | **峰值控制（Peak control）** | 更快的下行动态，压住峰值和撞击声。 |
+| **向上扩展器（Upward expander）** | 低电平向下扩展：把安静段的底噪"再往下推"，避免整条链把安静对白压平。阈值耦 scene level，不是输入包络。 |
+| **音色塑形（Tone shaper）** | 倾斜搁架 + 3 kHz 临场峰；单个 Tone 旋钮在 −1（更暖/更暗）与 +1（更亮/更前）之间旋转；0 处严格直通。 |
 | **真峰值天花板（True-peak ceiling）** | 允许的真峰值上限（−1 dBTP）。 |
-| **噪声轮廓（Noise profile）** | 从低能量间隙学到的稳态噪声频谱估计。 |
+| **降噪模式（Denoise mode）** | 可选的降噪引擎：Off / Classic（自研频谱 STFT）/ Live（DeepFilterNet3，实时）/ HQ（MossFormer2，仅离线）。Amount 旋钮在所选引擎内部统一映射为"降噪强度"。 |
 | **对白可懂度** | 音乐床下的同期人声是否听得懂。这是本项目的成功判据 —— **不是**广播 LUFS 合规。 |
 
 ---
@@ -64,7 +67,7 @@ In → ChannelRepair → Leveler → HPF → NoiseSuppressor → OutputGain → 
 2. 把 `SyncTrack Prep.vst3` 放到 `C:\Program Files\Common Files\VST3\`（需要管理员权限）。
 3. 重启 DAW，重新扫描 VST3 插件。
 
-> Windows 二进制由 CI 构建，但**还没有在任何 Windows DAW 里实测过** —— 见[已知局限](#已知局限)。
+> Windows 二进制已由外部灰测用户在 Windows 上的 Nuendo 里实测过；残余局限见[已知局限](#已知局限)。
 
 ---
 
@@ -96,24 +99,28 @@ In → ChannelRepair → Leveler → HPF → NoiseSuppressor → OutputGain → 
 
 ## 怎么用
 
-只有四个控件，这是刻意的 —— 调校都放在预设里。
+六个控件，刻意为之 —— 调校都放在预设里。
 
 | 控件 | 范围 | 说明 |
 |---|---|---|
-| **Preset** | Soft / Strong / Clean | 默认 **Strong**。切换预设时也会带上该预设的 Denoise 默认值（Clean 开，Soft/Strong 关）；在你下次切换预设之前，你自己改过的 Denoise 选择会被保留。 |
-| **Denoise** | 开 / 关 | 频谱降噪。开关都不改变延迟。 |
-| **Output** | −24 … +12 dB | 安全级之前的补偿增益。−1 dBTP 天花板始终成立。 |
+| **Preset** | Soft / Strong / Clean | 默认 **Strong**。切换预设时也带上该预设的 Denoise Mode 默认值（Soft=Off，Strong=Live，Clean=Classic）；在你下次切换预设之前，你自己改过的 mode 选择会被保留。 |
+| **Denoise Mode** | Off / Classic / Live (DFN3) / HQ (MossFormer2) | Classic = 自研频谱；Live = 实时 NN；HQ = 离线 NN（实时回放时静默降级为 Live 并显示提示）。 |
+| **Amount** | 0–100 % | 统一"降噪强度"：Classic 内部映射过减因子，Live 映射衰减上限，HQ 映射湿/干混合比。 |
+| **Tone** | −1 … +1 | 倾斜 + 3 kHz 临场；0 处比特直通。 |
+| **Output** | −inf … +24 dB | 安全级之前的补偿增益。skewed 范围，0 dB 居中；低于 −60 dB 显示 "-inf"。−1 dBTP 天花板始终成立。 |
 | **Bypass** | 开 / 关 | 真旁通 —— 输入原样通过。 |
 
 **该选哪个预设？**
 
 * **Soft** —— 轻手。素材本身比较干净，只想修声道布局 + 温和整平时用。
-* **Strong** *（默认）* —— 主力档。更重的整平（最多 +18 dB 增益、3:1 峰值控制），适合电平起伏大的镜头。
-* **Clean** —— Leveler 退让，让降噪器干活（Denoise 默认打开）。稳态底噪是主要矛盾时用。
+* **Strong** *（默认）* —— 主力档。更重的整平（最多 +18 dB 增益、3:1 峰值控制）+ 实时 NN 降噪。电平起伏大、外景底噪重的镜头首选。
+* **Clean** —— Leveler 退让，让降噪器干活（默认 Classic 模式）。稳态底噪是主要矛盾时用。
 
-三个预设共享同一组目标：Leveler 目标 −18 dB、70 Hz 高通、真峰值天花板 −1 dBTP、峰值压缩器常开。
+三个预设共享同一组目标：Leveler 目标 −18 dB、降噪器内置 70 Hz 高通、真峰值天花板 −1 dBTP、峰值压缩器常开。
 
 只支持立体声进 / 立体声出。
+
+> **存档兼容说明：** v0.1.x 没有 `denoiseMode` 的旧工程加载时，若旧 Denoise 开关为 on 则映射到 **Live**，off 映射到 **Off** —— 这是有意的升级映射，已记入 changelog。Output 范围也变了，旧值加载会发生偏移，见[已知局限](#已知局限)。
 
 ---
 
@@ -121,9 +128,10 @@ In → ChannelRepair → Leveler → HPF → NoiseSuppressor → OutputGain → 
 
 这些提前讲清楚，能省掉一次 issue。
 
-* **在真实素材上，稳态降噪量可能并不明显。** 因为 Leveler 跑在降噪**之前**，安静段的底噪会先被抬起来（在我们的参考素材上大约抬了 9 dB），降噪器再去往回刮。在我们的测试源上，**Clean** 输出的稳态噪声电平最终比源**还高**，而不是更低。这是链路顺序的权衡，不是频谱级本身的 bug：同一个降噪器在单元测试里能把合成的稳态底噪压下 4 dB 以上。下决定之前，请用下面的离线渲染工具在你自己的素材上 A/B 听一遍。
-* **噪声估计器需要约一秒才稳定。** 它是在流中学习噪声频谱的，所以如果一段素材开头就是人声，最初约 16 个 STFT 帧可能会把对白当成噪声学进去。大约一秒内会自行纠正。
-* **Windows 二进制未经验证。** CI 会编译并跑单元测试，但还没有人把它装进 Windows 的 DAW 里试过。
+* **HQ（MossFormer2）需要离线渲染。** 只有当宿主标明非实时（Nuendo 的 Direct Offline Processing、导出/bounce 路径）才会真正运行。实时回放时该 mode 会静默降级为 **Live (DFN3)** 并显示提示。HQ 比 Live 多 ~4 秒的宿主延迟补偿，宿主能吃下。
+* **Classic（自研频谱）在真实素材上的稳态降噪量可能不大。** 合成稳态噪声上明显，真实房间底噪上效果偏温和。底噪是主要问题时请选 **Live（DFN3）** 或 **HQ（MossFormer2）**。
+* **Classic 噪声估计器需要约一秒才稳定。** 它是在流中学习噪声频谱的，所以如果一段素材开头就是人声，最初几个 STFT 帧可能会把对白当成噪声学进去。大约一秒内会自行纠正。
+* **v0.1.x 的旧工程加载会发生漂移。** 新 **Output** 范围是 −inf…+24 dB（skewed，0 dB 居中）—— 旧范围 −24…+12 把 0 dB 存在归一化值 0.667，新映射是 0.5，所以旧的 Output 值读数会偏。旧工程里用 Denoise 复选框的，加载时会变成 **Live (DFN3)**。两者都是有意的升级映射，不是 bug。
 * **仅立体声。** 不支持环绕或多声道。
 * **它不是交付工具。** SyncTrack Prep 不做广播响度交付（EBU R128 母版）、不做 AI 人声/音乐分离、不做离线频谱修复与去削波。它是同期轨的第一轮清理插件。
 
@@ -171,7 +179,7 @@ cmake --build build -j 8 --target SyncTrackPrepOffline
 ./build/SyncTrackPrepOffline input.wav output-strong.wav strong 1
 ```
 
-参数：`<输入.wav> <输出.wav> [soft|strong|clean] [denoise 0|1]`
+参数：`<输入.wav> <输出.wav> [soft|strong|clean] [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]`，另有 `--tap denoise|final`、`--expander 0|1`、`--flush <秒>`、`--dfn3 <模型.tar.gz>`、`--moss <模型.onnx>`。
 
 `scripts/` 下有三个分析工具（Python 3；`analyze_ab.py` 和 `diagnose_stereo_noise.py` 需要 `ffmpeg` 在 `PATH` 里）：
 
@@ -192,10 +200,10 @@ python3 scripts/diagnose_stereo_noise.py --gold input.wav
 
 ## 路线图
 
-* 在 Windows 上的 Cubase / Nuendo 里实测 Windows 构建
+* MossFormer2 流式化（因果化 + INT8 再试）—— 让 HQ 变成可实时档
 * AAX（Pro Tools）与 AU（Logic Pro）构建
-* 重新审视 Leveler-在-降噪-之前 的顺序，让稳态降噪在真实素材上可测量
 * 在 Reaper、FL Studio、Studio One 上做验证
+* 更多 Linux 覆盖（LV2 / CLAP）
 
 ---
 
@@ -205,10 +213,13 @@ SyncTrack Prep 以 **GNU Affero 通用公共许可证 v3.0 或更高版本**（A
 
 为什么是 AGPL：本插件链接了 [JUCE](https://juce.com) 框架，而 JUCE 的模块采用 AGPLv3 与商业 JUCE 许可的双授权。以 AGPLv3 发布，是把它作为自由软件分发时唯一许可兼容的路径。如果你 fork 并分发二进制，你必须以相同条款公开你的源码。
 
-第三方组件：
+随插件一起打包的第三方组件（完整表格见 `NOTICE`）：
 
 * **JUCE 8.0.8** —— AGPLv3 或商业 JUCE 许可。在 configure 阶段拉取，不随本仓库分发。
 * **Steinberg VST3 SDK** —— 随 JUCE 一起提供，专有许可与 GPLv3 双授权。
 * **Catch2 3.4.0** —— Boost Software License 1.0。仅测试依赖，在 configure 阶段拉取。
+* **DeepFilterNet3**（`libdf`）+ **DeepFilterNet3 模型** —— MIT / Apache-2.0。Live 档引擎，打包进 VST3。
+* **ONNX Runtime** —— MIT。MossFormer2 推理运行时，打包进 VST3 的 `Contents/Frameworks/libonnxruntime.dylib`。
+* **MossFormer2_SE_48K** 权重 —— Apache-2.0。HQ 档模型，打包进 VST3 的 `Contents/Resources/mossformer2/`。
 
 VST 是 Steinberg Media Technologies GmbH 在欧洲及其他国家的注册商标。

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SyncTrackPrep VERSION 0.1.0)
+project(SyncTrackPrep VERSION 0.2.0)
 
 if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build architectures for Mac OS X" FORCE)
