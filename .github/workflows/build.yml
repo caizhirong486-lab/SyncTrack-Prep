@@ -88,6 +88,10 @@ jobs:
           draft: true
           files: dist/*.zip
           body: |
+            ## What's new
+
+            See the project README and `changelog.md` (in the source repo) for the full notes.
+
             ## Install
 
             **macOS** — unzip, move `SyncTrack Prep.vst3` to `~/Library/Audio/Plug-Ins/VST3/`, then clear the quarantine flag:
@@ -103,4 +107,4 @@ jobs:
             ## Verified hosts
 
             Cubase and Nuendo on macOS (real time and offline bounce).
-            The Windows build is compiled and unit-tested by CI but has **not** been verified inside a DAW yet.
+            Nuendo on Windows — validated by an external grey-tester (real-time Live / DFN3 tier).
