@@ -6,9 +6,10 @@ The wrapper mirrors clearvoice/utils/decode.py for MossFormer2_SE_48K exactly
 (kaldi fbank 60 bins + first/second deltas -> MaskNet -> mask * STFT -> iSTFT),
 so the exported graph is validated against the reference pipeline for free.
 
-Deltas: torchaudio.functional.compute_deltas. Fbank dither is set to 0 (the
-reference decode uses dither=1.0, a small random noise; disabling it makes
-exports and C++/Python comparisons deterministic — inaudible difference).
+Deltas: torchaudio.functional.compute_deltas. The graph accepts normalised
+[-1, 1] audio, converts it to ClearerVoice's int16 domain for fbank/STFT, uses
+a fixed seeded dither=1.0 for deterministic renders, then converts the iSTFT
+output back to [-1, 1].
 
 Usage:
   python3 scripts/export_mossformer2_onnx.py \
@@ -19,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +36,9 @@ sys.path.insert(0, str(CV_STUDIO / "clearvoice"))
 sys.path.insert(0, str(CV_STUDIO))
 
 from clearvoice.models.mossformer2_se.mossformer2_se_wrapper import MossFormer2_SE_48K  # noqa: E402
-from clearvoice.utils.misc import stft, istft  # noqa: E402
+from clearvoice.utils.misc import compute_fbank, stft, istft  # noqa: E402
+
+MAX_WAV_VALUE = 32768.0
 
 
 def compute_fbank_no_dither(audio_in: torch.Tensor, args: SimpleNamespace) -> torch.Tensor:
@@ -45,6 +49,28 @@ def compute_fbank_no_dither(audio_in: torch.Tensor, args: SimpleNamespace) -> to
         audio_in, dither=0.0, frame_length=frame_length, frame_shift=frame_shift,
         num_mel_bins=args.num_mels, sample_frequency=args.sampling_rate,
         window_type=args.win_type)
+
+
+def clearervoice_reference(masknet: torch.nn.Module, wav: torch.Tensor,
+                           args: SimpleNamespace) -> torch.Tensor:
+    """Run the upstream ClearerVoice decode contract for one fixed chunk."""
+    audio = wav.squeeze(0) * MAX_WAV_VALUE
+    fbanks = compute_fbank(audio.unsqueeze(0), args)
+    fbank_tr = torch.transpose(fbanks, 0, 1)
+    fbank_delta = torchaudio.functional.compute_deltas(fbank_tr)
+    fbank_delta_delta = torchaudio.functional.compute_deltas(fbank_delta)
+    feats = torch.cat([
+        fbanks,
+        torch.transpose(fbank_delta, 0, 1),
+        torch.transpose(fbank_delta_delta, 0, 1),
+    ], dim=1).unsqueeze(0)
+
+    pred_mask = masknet(feats)[-1].permute(2, 1, 0)
+    spectrum = stft(audio, args)
+    masked_spec = spectrum * pred_mask
+    masked_spec_complex = masked_spec[:, :, 0] + 1j * masked_spec[:, :, 1]
+    output = istft(masked_spec_complex, args, len(audio))
+    return output.unsqueeze(0) / MAX_WAV_VALUE
 
 
 class MossFormer2SE48KFull(torch.nn.Module):
@@ -112,7 +138,7 @@ class MossFormer2SE48KFull(torch.nn.Module):
         idx = (torch.arange(n_frames).unsqueeze(1) * args.win_inc
                + torch.arange(n_fft).unsqueeze(0)).flatten()
         self.register_buffer("ola_idx", idx)
-        # --- kaldi fbank front-end constants (dither=0, use_energy=False) ---
+        # --- kaldi fbank front-end constants (dither=1, use_energy=False) ---
         self.register_buffer("fbank_window",
                              torch.hamming_window(args.win_len, periodic=False))
         # Fixed kaldi dither noise (dither=1.0): seeded so offline renders are
@@ -149,7 +175,11 @@ class MossFormer2SE48KFull(torch.nn.Module):
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         args = self.args
-        fbanks = self.kaldi_fbank(wav)                            # [S, 60]
+        # ClearerVoice's decoder runs fbank and STFT in int16 amplitude units,
+        # then divides the reconstructed waveform by 32768. Keeping this pair
+        # inside the graph gives every caller the same normalised-float API.
+        audio = wav * MAX_WAV_VALUE
+        fbanks = self.kaldi_fbank(audio)                          # [S, 60]
         fbank_tr = torch.transpose(fbanks, 0, 1)                  # [60, S]
         fbank_delta = torchaudio.functional.compute_deltas(fbank_tr)
         fbank_delta_delta = torchaudio.functional.compute_deltas(fbank_delta)
@@ -163,7 +193,7 @@ class MossFormer2SE48KFull(torch.nn.Module):
         pred_mask = pred_mask.permute(2, 1, 0)                    # [961, S, 1] as in decode.py
 
         # stft(audio_segment) in decode.py: unbatched input -> [961, S, 2]
-        spectrum = torch.stft(wav.squeeze(0), args.fft_len, args.win_inc,
+        spectrum = torch.stft(audio.squeeze(0), args.fft_len, args.win_inc,
                               args.win_len, window=self.window, center=False,
                               return_complex=False)
         masked_spec = spectrum * pred_mask
@@ -176,7 +206,7 @@ class MossFormer2SE48KFull(torch.nn.Module):
         out = torch.zeros(1, wav.shape[-1],
                           dtype=frames.dtype, device=frames.device)
         out = out.index_add(1, self.ola_idx, frames.reshape(1, -1)).squeeze(0)
-        out = out / self.istft_norm
+        out = out / self.istft_norm / MAX_WAV_VALUE
         return out.unsqueeze(0)
 
 
@@ -186,7 +216,7 @@ def main() -> int:
     ap.add_argument("--output", required=True, type=Path)
     ap.add_argument("--window", type=int, default=192000, help="export window in samples (4 s @48k)")
     ap.add_argument("--verify", type=Path, default=None, help="optional wav to compare ONNX vs torch")
-    ap.add_argument("--opset", type=int, default=17)
+    ap.add_argument("--opset", type=int, default=18)
     args_cli = ap.parse_args()
 
     args = SimpleNamespace(
@@ -208,13 +238,29 @@ def main() -> int:
 
     out_path = args_cli.output
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    external_path = out_path.with_name(out_path.name + ".data")
+    external_path.unlink(missing_ok=True)
     print(f"Exporting ONNX ({args_cli.window} samples fixed window) ...")
     torch.onnx.export(
         full, wav, str(out_path),
         input_names=["input"], output_names=["output"],
         dynamic_axes=None, opset_version=args_cli.opset, do_constant_folding=True,
+        external_data=False,
     )
     print(f"Wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
+
+    # The VST3 bundle copies one model file. A sidecar-based ONNX export looks
+    # small and validates locally while producing an unloadable bundle.
+    import onnx
+    exported = onnx.load(str(out_path), load_external_data=False)
+    actual_opsets = {item.domain: item.version for item in exported.opset_import}
+    external_count = sum(
+        item.data_location == onnx.TensorProto.EXTERNAL
+        for item in exported.graph.initializer)
+    assert actual_opsets.get("") == args_cli.opset, (
+        f"requested opset {args_cli.opset}, exported {actual_opsets.get('')}")
+    assert external_count == 0, (
+        f"export contains {external_count} external initializers; bundle needs one self-contained ONNX file")
 
     if args_cli.verify is not None:
         import onnxruntime as ort
@@ -224,6 +270,8 @@ def main() -> int:
         seg = torch.from_numpy(data.T).mean(dim=0, keepdim=True)[:, : args_cli.window]
         with torch.no_grad():
             torch_out = full(seg)
+            torch.manual_seed(20260906)
+            official_out = clearervoice_reference(wrapper.model, seg, args)
         sess = ort.InferenceSession(str(out_path), providers=["CPUExecutionProvider"])
         ort_out = sess.run(["output"], {"input": seg.numpy()})[0]
         diff = (torch_out.numpy() - ort_out).__abs__().max()
@@ -234,10 +282,22 @@ def main() -> int:
         rms_out = float(((b * b).mean()) ** 0.5)
         print(f"verify: max |torch-ort| = {diff:.3e}, corr = {corr:.6f}, "
               f"ort rms = {rms_out:.5f}")
+        official = official_out.numpy().flatten()
+        official_corr = float(
+            (official * b).sum()
+            / (max((official * official).sum(), 1e-20) ** 0.5
+               * max((b * b).sum(), 1e-20) ** 0.5))
+        official_rms = float(((official * official).mean()) ** 0.5)
+        rms_delta_db = 20.0 * math.log10(
+            max(rms_out, 1e-20) / max(official_rms, 1e-20))
+        print(f"official parity: corr = {official_corr:.6f}, "
+              f"rms delta = {rms_delta_db:+.4f} dB")
         # f32 runs of a 24-block model differ across math libraries; a raw
         # max-diff bound is meaningless. Graph equivalence is a correlation
         # gate; the hard numeric pin happens C++-ORT vs python-ORT downstream.
         assert corr > 0.99, "ONNX graph diverges from torch reference"
+        assert official_corr > 0.9999, "ONNX graph diverges from official ClearerVoice decode"
+        assert abs(rms_delta_db) < 0.1, "ONNX level diverges from official ClearerVoice decode"
     return 0
 
 

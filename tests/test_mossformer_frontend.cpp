@@ -91,3 +91,57 @@ TEST_CASE ("MossFormer stitching: chunk boundaries stay continuous and latency i
     SUCCEED ("Built without STP_ENABLE_MOSSFORMER");
 #endif
 }
+
+TEST_CASE ("MossFormer waveform contract matches the official int16-domain decode", "[denoise][moss][parity]")
+{
+#ifdef STP_ENABLE_MOSSFORMER
+    const auto model = mossModelFromEnv();
+    if (! model.existsAsFile())
+    {
+        SKIP ("MossFormer ONNX model not present (third_party/mossformer2/mossformer2_fp32.onnx)");
+    }
+
+    constexpr int sr = 48000;
+    constexpr int n = sr * 8;
+    MossFormerDenoise den;
+    den.setModelPath (model);
+    den.prepare ((double) sr, 512, 1);
+    REQUIRE (den.isLoaded());
+
+    juce::AudioBuffer<float> rendered (1, n);
+    for (int i = 0; i < n; ++i)
+    {
+        const float t = (float) i / (float) sr;
+        const float sample = 0.08f * std::sin (2.0f * juce::MathConstants<float>::pi * 220.0f * t)
+                           + 0.03f * std::sin (2.0f * juce::MathConstants<float>::pi * 331.0f * t);
+        rendered.setSample (0, i, sample);
+    }
+
+    den.setAmount (1.0f);
+    for (int off = 0; off < n; off += 512)
+    {
+        juce::AudioBuffer<float> slice (1, 512);
+        slice.copyFrom (0, 0, rendered, 0, off, 512);
+        den.process (slice);
+        rendered.copyFrom (0, off, slice, 0, 0, 512);
+    }
+
+    // Independent ClearerVoice Python decode of this probe measures RMS
+    // 0.00023073 over the first emitted 3.5 s. The broad bounds tolerate ORT
+    // and architecture drift while rejecting the old normalised-domain graph
+    // (RMS 0.0294, over two orders of magnitude too hot).
+    double energy = 0.0;
+    constexpr int emitted = MossFormerDenoise::window48 - MossFormerDenoise::trim48;
+    for (int i = 0; i < emitted; ++i)
+    {
+        const float sample = rendered.getSample (0, den.getLatencySamples() + i);
+        energy += (double) sample * (double) sample;
+    }
+    const float rms = (float) std::sqrt (energy / (double) emitted);
+    INFO ("official-reference RMS 0.00023073, rendered RMS " << rms);
+    REQUIRE (rms > 0.0001f);
+    REQUIRE (rms < 0.001f);
+#else
+    SUCCEED ("Built without STP_ENABLE_MOSSFORMER");
+#endif
+}

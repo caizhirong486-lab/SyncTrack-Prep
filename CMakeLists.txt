@@ -34,6 +34,11 @@ endif()
 
 option(STP_COPY_AFTER_BUILD "Copy the built plug-in into the system plug-in folder" ON)
 
+# JUCE signs and copies the bundle before project-added POST_BUILD resources.
+# With a bundled ORT dylib that produces an invalid signature and installs a
+# stale model, so the Apple/ORT path performs the final sign+copy itself below.
+set(STP_JUCE_COPY_AFTER_BUILD ${STP_COPY_AFTER_BUILD})
+
 # ---------------------------------------------------------------------------
 # NN denoise engines (Live = libDF/DFN3, HQ = ONNX Runtime/MossFormer2).
 # Both are optional: without them the plugin builds with Off/Classic only and
@@ -91,6 +96,10 @@ else()
     message(STATUS "ONNX Runtime not found — HQ tier passthrough")
 endif()
 
+if(APPLE AND STP_HAVE_MOSSFORMER)
+    set(STP_JUCE_COPY_AFTER_BUILD OFF)
+endif()
+
 juce_add_plugin(SyncTrackPrep
     COMPANY_NAME "wosmai"
     IS_SYNTH FALSE
@@ -98,7 +107,7 @@ juce_add_plugin(SyncTrackPrep
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD ${STP_COPY_AFTER_BUILD}
+    COPY_PLUGIN_AFTER_BUILD ${STP_JUCE_COPY_AFTER_BUILD}
     PLUGIN_MANUFACTURER_CODE Wosm
     PLUGIN_CODE Stp1
     FORMATS VST3 Standalone
@@ -161,6 +170,25 @@ function(stp_link_nn_engines TARGET IS_BUNDLE)
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mossformer2_fp32.onnx"
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/")
+            endif()
+            if(APPLE AND STP_HAVE_MOSSFORMER)
+                add_custom_command(TARGET ${ART} POST_BUILD
+                    COMMAND /usr/bin/codesign --force --sign -
+                        "$<TARGET_FILE_DIR:${ART}>/../Frameworks/libonnxruntime.dylib"
+                    COMMAND /usr/bin/codesign --force --deep --sign -
+                        "$<TARGET_BUNDLE_DIR:${ART}>"
+                    COMMAND /usr/bin/codesign --verify --deep --strict
+                        "$<TARGET_BUNDLE_DIR:${ART}>"
+                    VERBATIM)
+                if(STP_COPY_AFTER_BUILD AND ART STREQUAL "${TARGET}_VST3")
+                    get_property(STP_VST3_COPY_DIR GLOBAL PROPERTY JUCE_VST3_COPY_DIR)
+                    add_custom_command(TARGET ${ART} POST_BUILD
+                        COMMAND "${CMAKE_COMMAND}"
+                            "-Dsrc=$<TARGET_BUNDLE_DIR:${ART}>"
+                            "-Ddest=${STP_VST3_COPY_DIR}"
+                            -P "${JUCE_CMAKE_UTILS_DIR}/copyDir.cmake"
+                        VERBATIM)
+                endif()
             endif()
         endif()
     endforeach()
