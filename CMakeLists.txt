@@ -204,6 +204,12 @@ function(stp_link_nn_engines TARGET IS_BUNDLE)
                         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/dop_dither.f32"
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/")
             endif()
+            if(APPLE)
+                add_custom_command(TARGET ${ART} POST_BUILD
+                    COMMAND /usr/libexec/PlistBuddy -c
+                        "Set :CFBundleIdentifier com.wosmai.SyncTrackPrepHQLab"
+                        "$<TARGET_FILE_DIR:${ART}>/../Info.plist")
+            endif()
             if(APPLE AND STP_HAVE_MOSSFORMER)
                 add_custom_command(TARGET ${ART} POST_BUILD
                     COMMAND /usr/bin/codesign --force --sign -
