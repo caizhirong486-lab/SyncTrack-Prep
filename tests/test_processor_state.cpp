@@ -238,92 +238,146 @@ TEST_CASE ("Reported latency is fixed between Off and Classic", "[state]")
     REQUIRE (latOff == NoiseSuppressor::latencyWhenEnabled + TruePeakLimiter::lookaheadSamples);
 }
 
-TEST_CASE ("HQ uses Live latency until the host prepares offline processing", "[state][hq]")
+TEST_CASE ("HQ latency matrix: realtime and Short/Mixdown report the 250ms contract", "[state][hq]")
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    constexpr int hqLatency = MossFormerDenoise::latency48
-                            + TruePeakLimiter::lookaheadSamples;
+    constexpr int hq250 = MossFormerShortDenoise::contract48
+                        + TruePeakLimiter::lookaheadSamples;
+    constexpr int hq4s = MossFormerDenoise::latency48
+                       + TruePeakLimiter::lookaheadSamples;
 
-    // Merely selecting HQ must not put realtime transport behind the model's
-    // four-second offline window. VST3 changes kRealtime -> kOffline through
-    // setupProcessing before the processor is prepared again.
-    SyncTrackPrepProcessor selectedAfterPrepare;
-    setChoice (selectedAfterPrepare.apvts, "denoiseMode", (int) DenoiseMode::live);
-    selectedAfterPrepare.setNonRealtime (false);
-    selectedAfterPrepare.prepareToPlay (48000.0, 512);
-    REQUIRE (selectedAfterPrepare.getLatencySamples() < hqLatency);
+    // Realtime: the short window serves HQ at the fixed 250 ms contract; the
+    // 4s value must never appear in realtime, regardless of the render target.
+    SyncTrackPrepProcessor rt;
+    rt.setNonRealtime (false);
+    rt.prepareToPlay (48000.0, 512);
+    setChoice (rt.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    rt.flushPendingLatency();
+    REQUIRE (rt.getLatencySamples() == hq250);
+    REQUIRE (rt.getTailLengthSeconds() < 0.001);
 
-    setChoice (selectedAfterPrepare.apvts, "denoiseMode", (int) DenoiseMode::hq);
-    selectedAfterPrepare.flushPendingLatency();
-    REQUIRE (selectedAfterPrepare.getLatencySamples() < hqLatency);
+    rt.setHqRenderTarget (SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    rt.flushPendingLatency();
+    REQUIRE (rt.getLatencySamples() == hq250); // target never changes realtime
 
-    // Realtime host restarts keep the same low-latency fallback promise.
-    for (int restart = 0; restart < 3; ++restart)
-    {
-        if (restart > 0)
-            selectedAfterPrepare.prepareToPlay (48000.0, 512);
+    // Offline prepare with the Short/Mixdown target: same 250 ms contract.
+    SyncTrackPrepProcessor mix;
+    setChoice (mix.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    mix.setNonRealtime (true);
+    mix.prepareToPlay (48000.0, 512);
+    REQUIRE (mix.getLatencySamples() == hq250);
+    REQUIRE (mix.getTailLengthSeconds() > 0.24);
+    REQUIRE (mix.getTailLengthSeconds() < 0.26);
 
-        juce::AudioBuffer<float> preview (2, 512);
-        preview.clear();
-        juce::MidiBuffer previewMidi;
-        selectedAfterPrepare.processBlock (preview, previewMidi);
-        selectedAfterPrepare.flushPendingLatency();
-        REQUIRE (selectedAfterPrepare.getLatencySamples() < hqLatency);
-        REQUIRE (selectedAfterPrepare.isHqDegraded());
-    }
+    // Offline prepare with the 4s DOP target: the historical long-window
+    // contract, published only in offline processing.
+    SyncTrackPrepProcessor dop;
+    dop.setHqRenderTarget (SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    setChoice (dop.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    dop.setNonRealtime (true);
+    dop.prepareToPlay (48000.0, 512);
+    REQUIRE (dop.getLatencySamples() == hq4s);
+    REQUIRE (dop.getTailLengthSeconds() > 3.99);
+    REQUIRE (dop.getTailLengthSeconds() < 4.01);
 
-    // An HQ choice present before a realtime prepare behaves identically.
-    SyncTrackPrepProcessor selectedBeforePrepare;
-    setChoice (selectedBeforePrepare.apvts, "denoiseMode", (int) DenoiseMode::hq);
-    selectedBeforePrepare.setNonRealtime (false);
-    selectedBeforePrepare.prepareToPlay (48000.0, 512);
-    REQUIRE (selectedBeforePrepare.getLatencySamples() < hqLatency);
-    REQUIRE (selectedBeforePrepare.getTailLengthSeconds() < 0.001);
-
-    // The VST3 offline setup happens before prepareToPlay. That prepare must
-    // select MossFormer and publish its full latency before the first block.
-    selectedBeforePrepare.setNonRealtime (true);
-    selectedBeforePrepare.prepareToPlay (48000.0, 512);
-    REQUIRE (selectedBeforePrepare.getLatencySamples() == hqLatency);
-    REQUIRE (selectedBeforePrepare.getTailLengthSeconds() > 3.99);
-    REQUIRE (selectedBeforePrepare.getTailLengthSeconds() < 4.01);
-
-    juce::AudioBuffer<float> probe (2, 512);
-    probe.clear();
-    juce::MidiBuffer midi;
-    selectedBeforePrepare.processBlock (probe, midi);
-    selectedBeforePrepare.flushPendingLatency();
-    REQUIRE (selectedBeforePrepare.getLatencySamples() == hqLatency);
-    REQUIRE_FALSE (selectedBeforePrepare.isHqDegraded());
+    // DOP -> realtime without a re-prepare: latency returns to the 250 ms
+    // contract immediately (defensive publish; new short-window generation).
+    dop.setNonRealtime (false);
+    REQUIRE (dop.getLatencySamples() == hq250);
+    REQUIRE (dop.getTailLengthSeconds() < 0.001);
+    dop.flushPendingLatency();
+    REQUIRE (dop.getLatencySamples() == hq250);
 }
 
-TEST_CASE ("Audio-Mixdown style mode flip publishes HQ latency without a re-prepare", "[state][hq]")
+TEST_CASE ("Audio-Mixdown flip keeps the Short-target latency constant", "[state][hq]")
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    constexpr int hqLatency = MossFormerDenoise::latency48
-                            + TruePeakLimiter::lookaheadSamples;
+    constexpr int hq250 = MossFormerShortDenoise::contract48
+                        + TruePeakLimiter::lookaheadSamples;
+    constexpr int hq4s = MossFormerDenoise::latency48
+                       + TruePeakLimiter::lookaheadSamples;
 
-    // Nuendo's Audio Mixdown switches kRealtime -> kOffline in setupProcessing
-    // and skips prepareToPlay when rate and block size are unchanged. The mode
-    // flip itself must publish the offline engine's latency synchronously: an
-    // async correction after the first block makes the host compensate with
-    // the stale realtime latency and drops the render head.
+    // Short/Mixdown target: realtime -> offline -> realtime keeps the plugin
+    // latency identical throughout (no host re-compensation, no head loss).
     SyncTrackPrepProcessor mixdown;
     setChoice (mixdown.apvts, "denoiseMode", (int) DenoiseMode::hq);
     mixdown.setNonRealtime (false);
     mixdown.prepareToPlay (48000.0, 512);
-    REQUIRE (mixdown.getLatencySamples() < hqLatency);
+    REQUIRE (mixdown.getLatencySamples() == hq250);
 
     mixdown.setNonRealtime (true);   // setupProcessing; no prepareToPlay follows
-    REQUIRE (mixdown.getLatencySamples() == hqLatency);
-    REQUIRE (mixdown.getTailLengthSeconds() > 3.99);
+    REQUIRE (mixdown.getLatencySamples() == hq250);
+    REQUIRE (mixdown.getTailLengthSeconds() > 0.24);
+    REQUIRE (mixdown.getTailLengthSeconds() < 4.0);
 
-    // Returning to realtime restores the low-latency contract immediately.
     mixdown.setNonRealtime (false);
-    REQUIRE (mixdown.getLatencySamples() < hqLatency);
+    REQUIRE (mixdown.getLatencySamples() == hq250);
     REQUIRE (mixdown.getTailLengthSeconds() < 0.001);
+
+    // Sanity pin: the 4s contract still exists but is unreachable in realtime.
+    REQUIRE (hq4s > hq250);
+}
+
+TEST_CASE ("Render target: serialised, legacy-migrated, not automatable", "[state][hq]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SyncTrackPrepProcessor p;
+    REQUIRE (p.getHqRenderTarget() == SyncTrackPrepProcessor::HqRenderTarget::shortMixdown);
+
+    p.setHqRenderTarget (SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    {
+        juce::MemoryBlock blob;
+        p.getStateInformation (blob);
+        SyncTrackPrepProcessor restored;
+        restored.setStateInformation (blob.getData(), (int) blob.getSize());
+        REQUIRE (restored.getHqRenderTarget() == SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    }
+
+    // Legacy state (HQ selected, no target attribute) keeps the historical
+    // 4s DOP semantics; everything else migrates to Short/Mixdown.
+    {
+        juce::MemoryBlock blob;
+        p.getStateInformation (blob);
+        auto xml = juce::AudioProcessor::getXmlFromBinary (blob.getData(), (int) blob.getSize());
+        REQUIRE (xml != nullptr);
+        xml->removeAttribute ("hqRenderTarget");
+        juce::MemoryBlock legacy;
+        juce::AudioProcessor::copyXmlToBinary (*xml, legacy);
+
+        setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::hq);
+        juce::MemoryBlock blobHq;
+        p.getStateInformation (blobHq);
+        auto xmlHq = juce::AudioProcessor::getXmlFromBinary (blobHq.getData(), (int) blobHq.getSize());
+        REQUIRE (xmlHq != nullptr);
+        xmlHq->removeAttribute ("hqRenderTarget");
+        juce::AudioProcessor::copyXmlToBinary (*xmlHq, legacy);
+
+        SyncTrackPrepProcessor legacyHq;
+        legacyHq.setStateInformation (legacy.getData(), (int) legacy.getSize());
+        REQUIRE (legacyHq.getHqRenderTarget() == SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    }
+
+    // The target is not an automatable host parameter.
+    REQUIRE (p.apvts.getParameter ("hqRenderTarget") == nullptr);
+}
+
+TEST_CASE ("Single realtime HQ lease: CAS semantics and capacity fallback", "[state][hq][lease]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    REQUIRE (HqInstanceLease::owner() == 0);
+    REQUIRE (HqInstanceLease::tryAcquire (111));
+    REQUIRE_FALSE (HqInstanceLease::tryAcquire (222)); // deterministic rejection
+    REQUIRE (HqInstanceLease::owner() == 111);
+    REQUIRE_FALSE (HqInstanceLease::tryRelease (222));
+    REQUIRE (HqInstanceLease::tryRelease (111));
+    REQUIRE (HqInstanceLease::owner() == 0);
+    // re-acquire happens at the next generation, not mid-playback
+    REQUIRE (HqInstanceLease::tryAcquire (222));
+    HqInstanceLease::tryRelease (222);
 }
 
 namespace

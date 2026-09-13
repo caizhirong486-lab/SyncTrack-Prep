@@ -8,6 +8,7 @@
 #include <thread>
 
 std::atomic<int> SyncTrackPrepProcessor::traceInstanceCounter { 0 };
+std::atomic<std::uint64_t> HqInstanceLease::state { 0 };
 
 SyncTrackPrepProcessor::SyncTrackPrepProcessor()
     : AudioProcessor (BusesProperties()
@@ -36,8 +37,55 @@ SyncTrackPrepProcessor::SyncTrackPrepProcessor()
     applyPresetDefaults (1); // Strong default
 }
 
+bool SyncTrackPrepProcessor::isHqDegraded() const
+{
+    return hqDegraded.load (std::memory_order_relaxed);
+}
+
+SyncTrackPrepProcessor::HqRenderTarget SyncTrackPrepProcessor::readRenderTarget (const juce::ValueTree& state) const
+{
+    const auto v = state.getProperty ("hqRenderTarget", {});
+    if (v.isVoid())
+        return HqRenderTarget::shortMixdown; // default for fresh states
+    return (int) v == 1 ? HqRenderTarget::dop4s : HqRenderTarget::shortMixdown;
+}
+
+void SyncTrackPrepProcessor::setHqRenderTarget (HqRenderTarget t)
+{
+    if (t == hqRenderTarget)
+        return;
+    hqRenderTarget = t;
+    if (auto* st = apvts.state.isValid() ? &apvts.state : nullptr)
+    {
+        st->setProperty ("hqRenderTarget", (int) t, nullptr);
+    }
+    // Latency matrix recalculation (only Short/DOP offline differ; the
+    // realtime value is always the 250 ms contract).
+    if (dspPrepared.load (std::memory_order_relaxed) && pDenoiseMode != nullptr)
+    {
+        const auto mode = static_cast<DenoiseMode> (juce::jlimit (
+            0, numDenoiseModes - 1, juce::roundToInt (pDenoiseMode->load())));
+        requestLatencyUpdate (latencyForMode (mode));
+    }
+    tracef ("hqRenderTarget -> %d", (int) t);
+}
+
+HqRuntimeState SyncTrackPrepProcessor::getHqRuntimeState() const
+{
+    const auto mode = static_cast<DenoiseMode> (juce::jlimit (
+        0, numDenoiseModes - 1,
+        juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f)));
+    if (mode != DenoiseMode::hq)
+        return HqRuntimeState::inactive;
+    if (isNonRealtime() && getHqRenderTarget() == HqRenderTarget::dop4s)
+        return HqRuntimeState::dop4sOffline;
+    return mossShort.runtimeState();
+}
+
 SyncTrackPrepProcessor::~SyncTrackPrepProcessor()
 {
+    if (leaseId != 0)
+        HqInstanceLease::tryRelease (leaseId);
     tracef ("=== instance %d destroyed ===", traceInstance);
     if (traceFile != nullptr)
     {
@@ -153,9 +201,7 @@ void SyncTrackPrepProcessor::parameterChanged (const juce::String& parameterID, 
                 if (b->get() != on)
                     b->setValueNotifyingHost (on ? 1.0f : 0.0f);
 
-            DenoiseMode latencyMode = static_cast<DenoiseMode> (m->getIndex());
-            if (latencyMode == DenoiseMode::hq && ! isNonRealtime())
-                latencyMode = DenoiseMode::live;
+            const DenoiseMode latencyMode = static_cast<DenoiseMode> (m->getIndex());
             if (dspPrepared.load (std::memory_order_relaxed))
                 requestLatencyUpdate (latencyForMode (latencyMode));
         }
@@ -230,9 +276,18 @@ void SyncTrackPrepProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dfn3Stage.setModelPath (dfnModel);
     dfn3Stage.prepare (sampleRate, samplesPerBlock, numCh);
 
-    const auto mossModel = findBundleResourceDir ("mossformer2").getChildFile ("mossformer2_fp32.onnx");
+    const auto mossRes = findBundleResourceDir ("mossformer2");
+    const auto mossModel = mossRes.getChildFile ("mossformer2_dynamic.onnx");
     mossStage.setModelPath (mossModel);
     mossStage.prepare (sampleRate, samplesPerBlock, numCh);
+
+    mossShort.setMelPath (mossRes.getChildFile ("mel60_2048.f32"));
+    mossShort.setModelPath (mossModel);
+    mossShort.attachDfn3 (&dfn3Stage);
+    mossShort.setSynchronous (isNonRealtime());
+    mossShort.prepare (sampleRate, samplesPerBlock, numCh);
+    if (! isNonRealtime())
+        mossShort.setSynchronous (false);
 
     classicStage.prepare (sampleRate, samplesPerBlock, numCh);
 
@@ -242,22 +297,20 @@ void SyncTrackPrepProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     fadePos = 0;
     prevStage = nullptr;
 
-    // Resolve the engine here, on the message thread. The host sets the VST3
-    // processing mode before this prepare: an HQ choice therefore resolves to
-    // low-latency Live for realtime playback and to MossFormer for offline work.
+    // Resolve the engine here, on the message thread. HQ no longer degrades
+    // in realtime: the short-window engine serves it at the fixed 250 ms
+    // contract; the 4s DOP window is an offline-only stage.
     const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
                                       juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f));
     const DenoiseMode requestedMode = static_cast<DenoiseMode> (modeIdx);
-    DenoiseMode mode = requestedMode;
-    if (mode == DenoiseMode::hq && ! isNonRealtime())
-        mode = DenoiseMode::live;
+    const DenoiseMode mode = requestedMode;
     activeStage = stageForMode (mode);
 
     dryBypass.setSize (2, samplesPerBlock, false, true, true);
 
-    // VST3 switches realtime/offline mode in setupProcessing before the host
-    // prepares us again. Report the engine selected for that processing mode:
-    // HQ uses Live latency in realtime and MossFormer latency offline.
+    // Latency matrix: HQ realtime and Short/Mixdown offline both report the
+    // 250 ms short-window contract; 4s DOP offline reports the long-window
+    // engine latency (plan table).
     const int latency = latencyForMode (mode);
     pendingLatency.store (latency, std::memory_order_relaxed);
     setLatencySamples (latency);
@@ -271,6 +324,7 @@ void SyncTrackPrepProcessor::releaseResources()
 {
     tracef ("releaseResources (dspPrepared cleared)");
     dspPrepared.store (false, std::memory_order_relaxed);
+    lastStreamTime = -1;
 }
 
 double SyncTrackPrepProcessor::getTailLengthSeconds() const
@@ -285,7 +339,9 @@ double SyncTrackPrepProcessor::getTailLengthSeconds() const
 
     const auto mode = static_cast<DenoiseMode> (juce::jlimit (
         0, numDenoiseModes - 1, juce::roundToInt (pDenoiseMode->load())));
-    const double tail = mode == DenoiseMode::hq ? 4.0 : 0.0;
+    const double tail = mode == DenoiseMode::hq
+                            ? (getHqRenderTarget() == HqRenderTarget::dop4s ? 4.0 : 0.25)
+                            : 0.0;
     if (traceFile != nullptr && (traceTailReads < 8 || (traceTailReads & 1023) == 0))
         tracef ("getTailLengthSeconds -> %.1f (nonRT=%d)", tail, (int) isNonRealtime());
     ++traceTailReads;
@@ -318,21 +374,32 @@ void SyncTrackPrepProcessor::setNonRealtime (bool shouldBeNonRealtime) noexcept
 
     juce::AudioProcessor::setNonRealtime (shouldBeNonRealtime);
 
+    if (shouldBeNonRealtime)
+    {
+        mossShort.setSynchronous (true);
+        mossStage.setSyncWait (true);
+    }
+    else
+    {
+        mossStage.setSyncWait (false);
+        // DOP -> realtime without a re-prepare: new short-window generation
+        // serving the aligned DFN3 chain; latency returns to the 250 ms
+        // contract immediately (defensive publish, no mode-based guessing).
+        mossShort.setSynchronous (false);
+        lastStreamTime = -1;
+    }
+
     if (! dspPrepared.load (std::memory_order_relaxed) || pDenoiseMode == nullptr)
         return;
 
     const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
                                       juce::roundToInt (pDenoiseMode->load()));
-    const DenoiseMode requested = static_cast<DenoiseMode> (modeIdx);
-    DenoiseMode mode = requested;
-    if (mode == DenoiseMode::hq && ! shouldBeNonRealtime)
-        mode = DenoiseMode::live;
+    const DenoiseMode mode = static_cast<DenoiseMode> (modeIdx);
 
     const int latency = latencyForMode (mode);
     pendingLatency.store (latency, std::memory_order_relaxed);
     setLatencySamples (latency);
-    tracef ("  flip resolved requested=%d resolved=%d latency=%d",
-            (int) requested, (int) mode, latency);
+    tracef ("  flip resolved requested=%d latency=%d", (int) mode, latency);
 }
 
 bool SyncTrackPrepProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -349,7 +416,12 @@ DenoiseStage* SyncTrackPrepProcessor::stageForMode (DenoiseMode mode)
     switch (mode)
     {
         case DenoiseMode::live: return &dfn3Stage;
-        case DenoiseMode::hq:   return &mossStage;
+        case DenoiseMode::hq:
+            // 4s DOP window only for offline renders with the DOP target;
+            // everything else is the 160 ms short window.
+            if (isNonRealtime() && getHqRenderTarget() == HqRenderTarget::dop4s)
+                return &mossStage;
+            return &mossShort;
         case DenoiseMode::off:
         case DenoiseMode::classic:
         default:                return &classicStage;
@@ -358,6 +430,16 @@ DenoiseStage* SyncTrackPrepProcessor::stageForMode (DenoiseMode mode)
 
 int SyncTrackPrepProcessor::latencyForMode (DenoiseMode mode)
 {
+    if (mode == DenoiseMode::hq)
+    {
+        // Latency matrix (plan): realtime and Short/Mixdown offline = the
+        // 250 ms short-window contract; 4s DOP offline = the long-window
+        // engine. The 4s value is NEVER reported in realtime.
+        const bool dop = isNonRealtime()
+                         && getHqRenderTarget() == HqRenderTarget::dop4s;
+        return (dop ? mossStage.getLatencySamples() : mossShort.getLatencySamples())
+               + truePeakLimiter.getLatencySamples();
+    }
     return stageForMode (mode)->getLatencySamples()
          + truePeakLimiter.getLatencySamples();
 }
@@ -380,17 +462,14 @@ void SyncTrackPrepProcessor::updateDspParams()
     const int preset = juce::jlimit (0, 2, juce::roundToInt (pPreset != nullptr ? pPreset->load() : 1.0f));
     const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
                                       juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f));
-    const DenoiseMode requestedMode = static_cast<DenoiseMode> (modeIdx);
-    DenoiseMode mode = requestedMode;
+    const DenoiseMode mode = static_cast<DenoiseMode> (modeIdx);
 
-    // HQ runs the heavy model only in offline (non-realtime) processing;
-    // realtime playback of an HQ selection degrades to Live (DFN3).
-    bool degraded = false;
-    if (mode == DenoiseMode::hq && ! isNonRealtime())
-    {
-        mode = DenoiseMode::live;
-        degraded = true;
-    }
+    // HQ no longer degrades in realtime; the short window runs the real
+    // engine at the 250 ms contract. Degraded = runtime fallback states.
+    const bool degraded = mode == DenoiseMode::hq
+                          && (getHqRuntimeState() == HqRuntimeState::fallbackCapacity
+                              || getHqRuntimeState() == HqRuntimeState::fallbackDeadline
+                              || getHqRuntimeState() == HqRuntimeState::fallbackModelError);
     hqDegraded.store (degraded, std::memory_order_relaxed);
 
     auto chain = Presets::chainFor (preset, mode);
@@ -403,6 +482,7 @@ void SyncTrackPrepProcessor::updateDspParams()
     classicStage.setClassicParams (chain.noiseSuppressor);
     dfn3Stage.setAmount (amount);
     mossStage.setAmount (amount);
+    mossShort.setAmount (amount);
     channelRepair.setParams (chain.channelRepair);
     leveler.setParams (chain.leveler);
     peakCompressor.setParams (chain.peakCompressor);
@@ -462,6 +542,60 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
 
     updateDspParams();
+
+    // Transport bookkeeping: generation bumps on any discontinuity, the
+    // single-instance lease is taken/released around actual HQ playback.
+    const int modeNow = juce::jlimit (0, numDenoiseModes - 1,
+                                      juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f));
+    bool playingNow = false;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            playingNow = pos->getIsPlaying();
+            if (const auto tOpt = pos->getTimeInSamples())
+            {
+                const std::int64_t now = *tOpt;
+                const std::int64_t step = buffer.getNumSamples();
+                if (lastStreamTime >= 0 && now != lastStreamTime + step)
+                {
+                    // seek, Cycle wrap, stop/replay, variable jump
+                    tracef ("  generation bump (stream jump %lld -> %lld)",
+                            (long long) lastStreamTime, (long long) now);
+                    mossShort.bumpGeneration (now);
+                    lastStreamTime = now;
+                }
+                else
+                {
+                    lastStreamTime = now;
+                }
+            }
+        }
+    transportPlaying.store (playingNow, std::memory_order_relaxed);
+
+    if (modeNow == (int) DenoiseMode::hq)
+    {
+        const std::uint64_t self = (std::uint64_t) (std::uintptr_t) this;
+        if (leaseId == 0)
+        {
+            // acquire only when actually playing HQ in realtime
+            if (playingNow && ! isNonRealtime()
+                && HqInstanceLease::tryAcquire (self))
+                leaseId = self;
+            else if (HqInstanceLease::owner() != self)
+                mossShort.setCapacityFallback (true);
+        }
+        if (leaseId == self && (isNonRealtime() || (! playingNow && false)))
+            {} // keep the lease through stop/seek/Mixdown/DOP (plan rule)
+        if (leaseId == self && modeNow == (int) DenoiseMode::hq
+            && HqInstanceLease::owner() == self)
+            mossShort.setCapacityFallback (false);
+    }
+    else if (leaseId != 0)
+    {
+        HqInstanceLease::tryRelease (leaseId);
+        leaseId = 0;
+        mossShort.setCapacityFallback (false);
+    }
 
     const int winNow = activeStage == &mossStage ? mossStage.debugWindowsRun() : -1;
     const bool traceThisBlock = traceFile != nullptr
@@ -569,7 +703,10 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 void SyncTrackPrepProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = apvts.copyState().createXml())
+    {
+        xml->setAttribute ("hqRenderTarget", (int) hqRenderTarget);
         copyXmlToBinary (*xml, destData);
+    }
 }
 
 void SyncTrackPrepProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -592,6 +729,21 @@ void SyncTrackPrepProcessor::setStateInformation (const void* data, int sizeInBy
 
             apvts.replaceState (tree);
             lastPreset = juce::roundToInt (pPreset != nullptr ? pPreset->load() : 1.0f);
+
+            // Render target: explicit attribute wins; legacy states that had
+            // HQ selected keep the historical 4s DOP semantics (plan rule).
+            if (xml->hasAttribute ("hqRenderTarget"))
+                hqRenderTarget = (int) xml->getIntAttribute ("hqRenderTarget", 0) == 1
+                                     ? HqRenderTarget::dop4s : HqRenderTarget::shortMixdown;
+            else
+            {
+                const auto restoredMode = static_cast<DenoiseMode> (juce::jlimit (
+                    0, numDenoiseModes - 1,
+                    juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f)));
+                hqRenderTarget = restoredMode == DenoiseMode::hq
+                                     ? HqRenderTarget::dop4s
+                                     : HqRenderTarget::shortMixdown;
+            }
 
             if (! hasMode)
             {

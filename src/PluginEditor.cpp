@@ -50,7 +50,7 @@ void GoldKnobLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int
 SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    setSize (384, 520);
+    setSize (384, 548);
     setLookAndFeel (&goldLf);
 
     titleLabel.setText ("SyncTrack Prep", juce::dontSendNotification);
@@ -84,7 +84,35 @@ SyncTrackPrepEditor::SyncTrackPrepEditor (SyncTrackPrepProcessor& p)
     denoiseModeBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);
     addAndMakeVisible (denoiseModeBox);
 
-    hqHintLabel.setText ("HQ needs offline rendering - realtime playback runs Live (DFN3)",
+    hqRenderLabel.setText ("HQ Render", juce::dontSendNotification);
+    hqRenderLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.55f));
+    hqRenderLabel.setFont (juce::FontOptions (11.0f));
+    hqRenderLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (hqRenderLabel);
+
+    hqRenderBox.addItem ("Short / Mixdown", 1);
+    hqRenderBox.addItem ("4 s DOP", 2);
+    hqRenderBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff1e222b));
+    hqRenderBox.setColour (juce::ComboBox::outlineColourId, juce::Colour (0xff3a4050));
+    hqRenderBox.setColour (juce::ComboBox::textColourId, juce::Colours::white);
+    hqRenderBox.onChange = [this]
+    {
+        const bool playing = proc.isTransportRunning();
+        if (playing)
+            return; // plan: not modifiable during playback
+        proc.setHqRenderTarget (hqRenderBox.getSelectedItemIndex() == 1
+                                    ? SyncTrackPrepProcessor::HqRenderTarget::dop4s
+                                    : SyncTrackPrepProcessor::HqRenderTarget::shortMixdown);
+    };
+    addAndMakeVisible (hqRenderBox);
+
+    hqStatusLabel.setText ({}, juce::dontSendNotification);
+    hqStatusLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.7f));
+    hqStatusLabel.setFont (juce::FontOptions (10.5f));
+    hqStatusLabel.setJustificationType (juce::Justification::centredLeft);
+    addAndMakeVisible (hqStatusLabel);
+
+    hqHintLabel.setText ("4 s DOP never applies to Audio Mixdown",
                          juce::dontSendNotification);
     hqHintLabel.setColour (juce::Label::textColourId, juce::Colour (0xfff0c14b));
     hqHintLabel.setFont (juce::FontOptions (10.5f));
@@ -218,9 +246,16 @@ void SyncTrackPrepEditor::resized()
     denoiseModeBox.setBounds (row1.removeFromLeft (row1.getWidth()));
 
     r.removeFromTop (6);
-    hqHintLabel.setBounds (r.removeFromTop (16));
+    hqHintLabel.setBounds (r.removeFromTop (15));
 
-    r.removeFromTop (6);
+    r.removeFromTop (3);
+    auto hqRow = r.removeFromTop (24);
+    hqRenderLabel.setBounds (hqRow.removeFromLeft (66));
+    hqRenderBox.setBounds (hqRow.removeFromLeft (110));
+    hqRow.removeFromLeft (8);
+    hqStatusLabel.setBounds (hqRow);
+
+    r.removeFromTop (4);
 
     // Knob zone (card interior): one hero knob + two support knobs
     auto knobZone = r.removeFromTop (200);
@@ -256,6 +291,38 @@ void SyncTrackPrepEditor::resized()
 
 void SyncTrackPrepEditor::timerCallback()
 {
+    const bool hqSelected = [&]
+    {
+        if (auto* m = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter ("denoiseMode")))
+            return m->getIndex() == 3;
+        return false;
+    }();
+    hqRenderLabel.setVisible (hqSelected);
+    hqRenderBox.setVisible (hqSelected);
+    hqStatusLabel.setVisible (hqSelected);
+    hqRenderBox.setEnabled (! proc.isTransportRunning());
+
+    if (hqSelected)
+    {
+        hqRenderBox.setSelectedItemIndex (
+            proc.getHqRenderTarget() == SyncTrackPrepProcessor::HqRenderTarget::dop4s ? 1 : 0,
+            juce::dontSendNotification);
+        const auto st = proc.getHqRuntimeState();
+        const char* text = "";
+        switch (st)
+        {
+            case HqRuntimeState::inactive:          text = "HQ idle"; break;
+            case HqRuntimeState::loading:           text = "Loading model..."; break;
+            case HqRuntimeState::warming:           text = "Warming HQ..."; break;
+            case HqRuntimeState::shortActive:       text = "HQ 160ms active"; break;
+            case HqRuntimeState::dop4sOffline:      text = "HQ 4s DOP"; break;
+            case HqRuntimeState::fallbackCapacity:  text = "Fallback DFN3 (another HQ instance owns realtime)"; break;
+            case HqRuntimeState::fallbackDeadline:  text = "Fallback DFN3 (overload this generation)"; break;
+            case HqRuntimeState::fallbackModelError: text = "Fallback DFN3 (model unavailable)"; break;
+        }
+        hqStatusLabel.setText (text, juce::dontSendNotification);
+    }
+
     const float in = proc.getInputPeak();
     const float out = proc.getOutputPeak();
     inPeakSmooth = juce::jmax (in, 0.82f * inPeakSmooth + 0.18f * in);
@@ -265,7 +332,7 @@ void SyncTrackPrepEditor::timerCallback()
     if (out < outPeakSmooth * 0.99f)
         outPeakSmooth *= 0.94f;
 
-    hqHintLabel.setVisible (proc.isHqDegraded());
+    hqHintLabel.setVisible (hqSelected && proc.isHqDegraded());
 
     inMeterLabel.setText ({}, juce::dontSendNotification);
     outMeterLabel.setText ({}, juce::dontSendNotification);

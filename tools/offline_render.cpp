@@ -6,6 +6,7 @@
  *       [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]
  *       [--tap denoise|final] [--expander 0|1] [--flush 4.0]
  *       [--dfn3 <model.tar.gz>] [--moss <model.onnx>]
+ *       [--hq-render short|dop4s]
  *
  * The CLI always behaves as non-realtime, so HQ (MossFormer2) runs the true
  * model here. --tap denoise stops after the denoise stage (before the tone
@@ -16,6 +17,8 @@
 #include "dsp/ClassicDenoise.h"
 #include "dsp/Dfn3Denoise.h"
 #include "dsp/MossFormerDenoise.h"
+#include "dsp/MossFormerShortDenoise.h"
+#include "dsp/MossFormerMaskNet.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <iostream>
@@ -38,7 +41,8 @@ DenoiseMode parseMode (const char* s, bool& ok)
 static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset,
                         DenoiseMode mode, float denoiseAmountPct, float tone,
                         const juce::String& tap, bool expanderOn,
-                        const juce::File& dfn3Model, const juce::File& mossModel)
+                        const juce::File& dfn3Model, const juce::File& mossResDir,
+                        const juce::String& hqRender)
 {
     juce::dsp::ProcessSpec spec { sr, (juce::uint32) juce::jmax (1, buf.getNumSamples()),
                                   (juce::uint32) juce::jmax (1, buf.getNumChannels()) };
@@ -46,13 +50,25 @@ static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset,
     ChannelRepair cr; Leveler lv; PeakCompressor pc;
     ToneShaper ts; TruePeakLimiter tp; UpwardExpander ue;
     ClassicDenoise classic; Dfn3Denoise dfn3; MossFormerDenoise moss;
+    MossFormerShortDenoise mossShort;
     cr.prepare (spec); lv.prepare (spec); pc.prepare (spec);
     ts.prepare (spec); tp.prepare (spec); ue.prepare (spec);
     dfn3.setModelPath (dfn3Model);
     dfn3.prepare (sr, spec.maximumBlockSize, buf.getNumChannels());
-    moss.setModelPath (mossModel);
+    moss.setModelPath (mossResDir.getChildFile ("mossformer2_dynamic.onnx"));
+    moss.setMelPath (mossResDir.getChildFile ("mel60_2048.f32"));
+    moss.setDopDitherPath (mossResDir.getChildFile ("dop_dither.f32"));
+    moss.attachDfn3 (&dfn3);
+    moss.setSyncWait (true);
     moss.prepare (sr, spec.maximumBlockSize, buf.getNumChannels());
+    mossShort.setMelPath (mossResDir.getChildFile ("mel60_2048.f32"));
+    mossShort.setModelPath (mossResDir.getChildFile ("mossformer2_dynamic.onnx"));
+    mossShort.attachDfn3 (&dfn3);
+    mossShort.prepare (sr, spec.maximumBlockSize, buf.getNumChannels());
     classic.prepare (sr, spec.maximumBlockSize, buf.getNumChannels());
+    const bool shortRender = hqRender == "short";
+    mossShort.setSynchronous (true);
+    (void) shortRender;
 
     auto chain = Presets::chainFor (preset, mode);
     if (denoiseAmountPct >= 0.0f)
@@ -70,11 +86,13 @@ static void applyChain (juce::AudioBuffer<float>& buf, double sr, int preset,
 
     DenoiseStage* stage = &classic;
     if (mode == DenoiseMode::live)    stage = &dfn3;
-    else if (mode == DenoiseMode::hq) stage = &moss;
+    else if (mode == DenoiseMode::hq) stage = shortRender ? (DenoiseStage*) &mossShort
+                                                          : (DenoiseStage*) &moss;
 
     const float amount = chain.noiseSuppressor.amount;
     dfn3.setAmount (amount);
     moss.setAmount (amount);
+    mossShort.setAmount (amount);
 
     // Continuous per-sample scene level (no output gain offline: base 0).
     pc.bindSceneSource (&lv.sceneStream());
@@ -115,7 +133,7 @@ int main (int argc, char** argv)
         std::cerr << "Usage: SyncTrackPrepOffline <in.wav> <out.wav> [soft|strong|clean] "
                      "[off|classic|live|hq] [amount 0-100|-1] [tone -1..1] "
                      "[--tap denoise|final] [--expander 0|1] [--flush <sec>] "
-                     "[--dfn3 <tar.gz>] [--moss <onnx>]\n";
+                     "[--dfn3 <tar.gz>] [--moss <dir>] [--hq-render short|dop4s]\n";
         return 1;
     }
     int preset = Presets::strong;
@@ -126,6 +144,7 @@ int main (int argc, char** argv)
     juce::String tap = "final";
     bool expanderOn = true;
     double flushSec = 0.0;
+    juce::String hqRender = "dop4s";
     juce::File dfn3Model, mossModel;
 
     std::vector<juce::String> positional;
@@ -137,7 +156,13 @@ int main (int argc, char** argv)
         else if (a == "--flush")    flushSec = (i + 1 < argc ? juce::String (argv[++i]) : juce::String()).getDoubleValue();
         else if (a == "--dfn3")     dfn3Model = i + 1 < argc ? juce::String (argv[++i]) : juce::String();
         else if (a == "--moss")     mossModel = i + 1 < argc ? juce::String (argv[++i]) : juce::String();
+        else if (a == "--hq-render") hqRender = i + 1 < argc ? juce::String (argv[++i]) : hqRender;
         else positional.push_back (a);
+    }
+    if (hqRender != "short" && hqRender != "dop4s")
+    {
+        std::cerr << "Bad --hq-render (short|dop4s)\n";
+        return 1;
     }
     auto positionalAs = [&] (int idx) -> const juce::String
     { return idx < positional.size() ? positional[(size_t) idx] : juce::String(); };
@@ -167,8 +192,8 @@ int main (int argc, char** argv)
     if (mossModel == juce::File())
     {
         const auto p = juce::File::getCurrentWorkingDirectory()
-                           .getChildFile ("third_party/mossformer2/mossformer2_fp32.onnx");
-        if (p.existsAsFile())
+                           .getChildFile ("third_party/mossformer2");
+        if (p.isDirectory())
             mossModel = p;
     }
 
@@ -190,7 +215,7 @@ int main (int argc, char** argv)
     }
 
     applyChain (buf, reader->sampleRate, preset, mode, amount, tone, tap,
-                expanderOn, dfn3Model, mossModel);
+                expanderOn, dfn3Model, mossModel, hqRender);
 
     if (outFile.existsAsFile())
         outFile.deleteFile();
@@ -203,6 +228,7 @@ int main (int argc, char** argv)
     writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
     std::cout << "Wrote " << argv[2] << " preset=" << preset
               << " mode=" << denoiseModeName ((int) mode)
+              << (mode == DenoiseMode::hq ? " hqRender=" + hqRender : juce::String())
               << " tap=" << tap << " expander=" << (expanderOn ? 1 : 0)
               << " flush=" << flushSec << "s"
               << " amount=" << amount << " tone=" << tone << "\n";

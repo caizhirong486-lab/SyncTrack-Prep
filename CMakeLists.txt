@@ -96,6 +96,31 @@ else()
     message(STATUS "ONNX Runtime not found — HQ tier passthrough")
 endif()
 
+# Strict acceptance build: refuse to configure without the full NN stack and
+# all model resources. Ordinary model-less CI keeps the stub build.
+option(STP_REQUIRE_NN "Fail configuration unless DFN3 + MossFormer + models are present" OFF)
+if(STP_REQUIRE_NN)
+    set(STP_NN_MISSING "")
+    if(NOT STP_HAVE_DFN3)
+        list(APPEND STP_NN_MISSING "libDF/DFN3")
+    endif()
+    if(NOT STP_HAVE_MOSSFORMER)
+        list(APPEND STP_NN_MISSING "ONNX Runtime")
+    endif()
+    foreach(f third_party/dfn/model/DeepFilterNet3_onnx.tar.gz
+              third_party/mossformer2/mossformer2_dynamic.onnx
+              third_party/mossformer2/mel60_2048.f32
+              third_party/mossformer2/dop_dither.f32)
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${f}")
+            list(APPEND STP_NN_MISSING "${f}")
+        endif()
+    endforeach()
+    if(STP_NN_MISSING)
+        message(FATAL_ERROR "STP_REQUIRE_NN=ON but missing: ${STP_NN_MISSING}")
+    endif()
+    message(STATUS "STP_REQUIRE_NN: all NN engines and models present")
+endif()
+
 if(APPLE AND STP_HAVE_MOSSFORMER)
     set(STP_JUCE_COPY_AFTER_BUILD OFF)
 endif()
@@ -109,9 +134,11 @@ juce_add_plugin(SyncTrackPrep
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD ${STP_JUCE_COPY_AFTER_BUILD}
     PLUGIN_MANUFACTURER_CODE Wosm
-    PLUGIN_CODE Stp1
+    # HQ Lab identity (plan: parallel installation next to the official
+    # "SyncTrack Prep"; restored to Stp1/official name when promoting).
+    PLUGIN_CODE StHL
     FORMATS VST3 Standalone
-    PRODUCT_NAME "SyncTrack Prep"
+    PRODUCT_NAME "SyncTrack Prep HQ Lab"
 )
 
 juce_generate_juce_header(SyncTrackPrep)
@@ -163,12 +190,18 @@ function(stp_link_nn_engines TARGET IS_BUNDLE)
                         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dfn/model/DeepFilterNet3_onnx.tar.gz"
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/dfn3/")
             endif()
-            if(STP_HAVE_MOSSFORMER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mossformer2_fp32.onnx")
+            if(STP_HAVE_MOSSFORMER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mossformer2_dynamic.onnx")
                 add_custom_command(TARGET ${ART} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E make_directory
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2"
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mossformer2_fp32.onnx"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mossformer2_dynamic.onnx"
+                        "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/mel60_2048.f32"
+                        "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/dop_dither.f32"
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/")
             endif()
             if(APPLE AND STP_HAVE_MOSSFORMER)
@@ -203,7 +236,10 @@ set(STP_DSP_SOURCES
     src/dsp/NoiseSuppressor.cpp
     src/dsp/UpwardExpander.cpp
     src/dsp/Dfn3Denoise.cpp
+    src/dsp/MossFormerFrontend.cpp
+    src/dsp/MossFormerMaskNet.cpp
     src/dsp/MossFormerDenoise.cpp
+    src/dsp/MossFormerShortDenoise.cpp
 )
 
 target_sources(SyncTrackPrep
@@ -287,6 +323,9 @@ if(STP_BUILD_TESTS)
         tests/test_classic_denoise_regression.cpp
         tests/test_dfn3_denoise.cpp
         tests/test_mossformer_frontend.cpp
+        tests/test_mossformer_frontend_cpp.cpp
+        tests/test_hq_short_engine.cpp
+        tests/test_hq_dop_engine.cpp
         tests/test_stage_resampler.cpp
         ${STP_DSP_SOURCES}
     )
