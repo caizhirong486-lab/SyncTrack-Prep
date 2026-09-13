@@ -76,7 +76,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 | DAW | Status |
 |---|---|
 | **Cubase** | ✅ Verified — runs stably in real time and in offline bounce (tested on macOS) |
-| **Nuendo** | ✅ Verified — runs stably in real time and in offline bounce (tested on macOS) |
+| **Nuendo** | ✅ Verified — realtime and HQ offline via Direct Offline Processing (macOS); HQ under **Audio Mixdown** is not supported (host drops the render head) |
 | Reaper | ⚠️ Not verified |
 | FL Studio | ⚠️ Not verified |
 | Studio One | ⚠️ Not verified |
@@ -128,7 +128,7 @@ Only stereo in / stereo out is supported.
 
 Being upfront about these will save you an issue report.
 
-* **HQ (MossFormer2) requires offline rendering.** It runs only when the host signals non-realtime (Nuendo Direct Offline Processing and the bounce export path). During realtime playback the chain silently degrades to **Live (DFN3)** and the editor shows a hint. Plan ~4s of extra reported latency for HQ, which the host's delay compensation will absorb.
+* **HQ (MossFormer2) requires offline rendering — use Direct Offline Processing.** It runs only when the host signals non-realtime. During realtime playback the chain silently degrades to **Live (DFN3)** and the editor shows a hint. Plan ~4s of extra reported latency for HQ, which hosts absorb correctly in Nuendo's **F7 Direct Offline Processing** (verified byte-stable across runs). Do not use the **Audio Mixdown** export with HQ: Nuendo's mixdown engine zero-fills the first ~3 s of a ~4 s-latency offline insert and under-collects its tail, so the render loses the head and tail — the plug-in reports latency and tail correctly (verified with an instrumented trace), this is a host-side limitation. A workaround is padding ≥4 s of silence before and after the material on the timeline, bouncing, and trimming.
 * **Classical spectral denoise on real material can be undramatic** when no NN tier is active. The in-house Classic denoiser is great on synth steady noise but quiet on real room tone; pick **Live** (DFN3) or **HQ** (MossFormer2) when the noise is the primary problem.
 * **The noise estimator in Classic needs about a second to settle.** It learns the noise spectrum mid-stream, so if a clip opens on speech the first few STFT frames can briefly learn dialogue instead of noise. It self-corrects in roughly one second.
 * **Saved sessions from v0.1.x load shifted.** The new **Output** range is −inf…+24 dB (skewed, 0 dB at the centre) — the old −24…+12 range stored 0 dB at a different normalised position, so existing Output values load different. Legacy projects that used the Denoise on/off checkbox now open with denoise on ⇒ **Live (DFN3)**. Both are documented upgrade mappings, not bugs.

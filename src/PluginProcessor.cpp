@@ -2,12 +2,27 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <thread>
+
+std::atomic<int> SyncTrackPrepProcessor::traceInstanceCounter { 0 };
+
 SyncTrackPrepProcessor::SyncTrackPrepProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", createParameterLayout())
 {
+    traceInstance = traceInstanceCounter.fetch_add (1);
+    if (juce::File ("/tmp/synctrackprep_trace.enable").existsAsFile())
+        if (auto* f = std::fopen ("/tmp/synctrackprep_trace.log", "a"))
+        {
+            traceFile = f;
+            tracef ("=== instance %d created ===", traceInstance);
+        }
+
     pPreset        = apvts.getRawParameterValue ("preset");
     pDenoiseMode   = apvts.getRawParameterValue ("denoiseMode");
     pDenoise       = apvts.getRawParameterValue ("denoise");
@@ -23,8 +38,40 @@ SyncTrackPrepProcessor::SyncTrackPrepProcessor()
 
 SyncTrackPrepProcessor::~SyncTrackPrepProcessor()
 {
+    tracef ("=== instance %d destroyed ===", traceInstance);
+    if (traceFile != nullptr)
+    {
+        std::fclose (traceFile);
+        traceFile = nullptr;
+    }
     apvts.removeParameterListener ("preset", this);
     apvts.removeParameterListener ("denoiseMode", this);
+}
+
+void SyncTrackPrepProcessor::tracef (const char* fmt, ...) const noexcept
+{
+    if (traceFile == nullptr)
+        return;
+
+    char line [448];
+    va_list args;
+    va_start (args, fmt);
+    const int n = std::vsnprintf (line, sizeof (line), fmt, args);
+    va_end (args);
+    if (n <= 0)
+        return;
+
+    char buf [512];
+    const long long ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int m = std::snprintf (buf, sizeof (buf), "[%lld ms] i%d t%zu %s\n",
+        ms, traceInstance,
+        (size_t) std::hash<std::thread::id>() (std::this_thread::get_id()), line);
+    if (m > 0)
+    {
+        std::fwrite (buf, 1, (size_t) m, traceFile);
+        std::fflush (traceFile);
+    }
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout SyncTrackPrepProcessor::createParameterLayout()
@@ -99,10 +146,18 @@ void SyncTrackPrepProcessor::parameterChanged (const juce::String& parameterID, 
         // Keep the legacy bool mirroring the mode for saved-state coherence.
         if (auto* m = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("denoiseMode")))
         {
+            tracef ("parameterChanged denoiseMode -> %d (nonRT=%d)",
+                    m->getIndex(), (int) isNonRealtime());
             const bool on = m->getIndex() != (int) DenoiseMode::off;
             if (auto* b = dynamic_cast<juce::AudioParameterBool*> (apvts.getParameter ("denoise")))
                 if (b->get() != on)
                     b->setValueNotifyingHost (on ? 1.0f : 0.0f);
+
+            DenoiseMode latencyMode = static_cast<DenoiseMode> (m->getIndex());
+            if (latencyMode == DenoiseMode::hq && ! isNonRealtime())
+                latencyMode = DenoiseMode::live;
+            if (dspPrepared.load (std::memory_order_relaxed))
+                requestLatencyUpdate (latencyForMode (latencyMode));
         }
     }
 }
@@ -187,24 +242,98 @@ void SyncTrackPrepProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     fadePos = 0;
     prevStage = nullptr;
 
-    // Resolve the engine here, on the message thread: reporting the classic
-    // latency now and correcting it from the first processBlock would make the
-    // host restart the component mid-render.
+    // Resolve the engine here, on the message thread. The host sets the VST3
+    // processing mode before this prepare: an HQ choice therefore resolves to
+    // low-latency Live for realtime playback and to MossFormer for offline work.
     const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
                                       juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f));
-    DenoiseMode mode = static_cast<DenoiseMode> (modeIdx);
+    const DenoiseMode requestedMode = static_cast<DenoiseMode> (modeIdx);
+    DenoiseMode mode = requestedMode;
     if (mode == DenoiseMode::hq && ! isNonRealtime())
         mode = DenoiseMode::live;
     activeStage = stageForMode (mode);
 
     dryBypass.setSize (2, samplesPerBlock, false, true, true);
 
-    const int latency = activeStage->getLatencySamples() + truePeakLimiter.getLatencySamples();
+    // VST3 switches realtime/offline mode in setupProcessing before the host
+    // prepares us again. Report the engine selected for that processing mode:
+    // HQ uses Live latency in realtime and MossFormer latency offline.
+    const int latency = latencyForMode (mode);
     pendingLatency.store (latency, std::memory_order_relaxed);
     setLatencySamples (latency);
+    dspPrepared.store (true, std::memory_order_relaxed);
+    tracef ("prepareToPlay sr=%.0f block=%d nonRT=%d requested=%d resolved=%d latency=%d",
+            sampleRate, samplesPerBlock, (int) isNonRealtime(),
+            (int) requestedMode, (int) mode, latency);
 }
 
-void SyncTrackPrepProcessor::releaseResources() {}
+void SyncTrackPrepProcessor::releaseResources()
+{
+    tracef ("releaseResources (dspPrepared cleared)");
+    dspPrepared.store (false, std::memory_order_relaxed);
+}
+
+double SyncTrackPrepProcessor::getTailLengthSeconds() const
+{
+    if (! isNonRealtime() || pDenoiseMode == nullptr)
+    {
+        if (traceFile != nullptr && (traceTailReads < 8 || (traceTailReads & 1023) == 0))
+            tracef ("getTailLengthSeconds -> 0.0");
+        ++traceTailReads;
+        return 0.0;
+    }
+
+    const auto mode = static_cast<DenoiseMode> (juce::jlimit (
+        0, numDenoiseModes - 1, juce::roundToInt (pDenoiseMode->load())));
+    const double tail = mode == DenoiseMode::hq ? 4.0 : 0.0;
+    if (traceFile != nullptr && (traceTailReads < 8 || (traceTailReads & 1023) == 0))
+        tracef ("getTailLengthSeconds -> %.1f (nonRT=%d)", tail, (int) isNonRealtime());
+    ++traceTailReads;
+    return tail;
+}
+
+
+void SyncTrackPrepProcessor::setNonRealtime (bool shouldBeNonRealtime) noexcept
+{
+    // The VST3 wrapper flips realtime/offline both in setupProcessing (host
+    // thread, no re-prepare when rate and block size are unchanged) and once
+    // per block from the audio thread. Nuendo's Audio Mixdown therefore never
+    // re-prepares: the mode flip itself must publish the new mode's latency,
+    // or the host compensates with the stale realtime latency and the render
+    // head is lost (pitfall 2026-09-13). Deduped; lock and allocation free.
+    if (traceFile != nullptr)
+    {
+        if (shouldBeNonRealtime != isNonRealtime())
+        {
+            tracef ("setNonRealtime(%d) [mode flip]", (int) shouldBeNonRealtime);
+            traceBounceBlocks = 0;
+            traceLastWin = -1;
+        }
+        else if (++traceNonRtRepeats <= 2 || (traceNonRtRepeats & 511) == 0)
+            tracef ("setNonRealtime(%d) [repeat #%d]", (int) shouldBeNonRealtime, traceNonRtRepeats);
+    }
+
+    if (shouldBeNonRealtime == isNonRealtime())
+        return;
+
+    juce::AudioProcessor::setNonRealtime (shouldBeNonRealtime);
+
+    if (! dspPrepared.load (std::memory_order_relaxed) || pDenoiseMode == nullptr)
+        return;
+
+    const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
+                                      juce::roundToInt (pDenoiseMode->load()));
+    const DenoiseMode requested = static_cast<DenoiseMode> (modeIdx);
+    DenoiseMode mode = requested;
+    if (mode == DenoiseMode::hq && ! shouldBeNonRealtime)
+        mode = DenoiseMode::live;
+
+    const int latency = latencyForMode (mode);
+    pendingLatency.store (latency, std::memory_order_relaxed);
+    setLatencySamples (latency);
+    tracef ("  flip resolved requested=%d resolved=%d latency=%d",
+            (int) requested, (int) mode, latency);
+}
 
 bool SyncTrackPrepProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -227,6 +356,12 @@ DenoiseStage* SyncTrackPrepProcessor::stageForMode (DenoiseMode mode)
     }
 }
 
+int SyncTrackPrepProcessor::latencyForMode (DenoiseMode mode)
+{
+    return stageForMode (mode)->getLatencySamples()
+         + truePeakLimiter.getLatencySamples();
+}
+
 void SyncTrackPrepProcessor::requestLatencyUpdate (int samples)
 {
     if (pendingLatency.exchange (samples, std::memory_order_relaxed) != samples)
@@ -245,7 +380,8 @@ void SyncTrackPrepProcessor::updateDspParams()
     const int preset = juce::jlimit (0, 2, juce::roundToInt (pPreset != nullptr ? pPreset->load() : 1.0f));
     const int modeIdx = juce::jlimit (0, numDenoiseModes - 1,
                                       juce::roundToInt (pDenoiseMode != nullptr ? pDenoiseMode->load() : 0.0f));
-    DenoiseMode mode = static_cast<DenoiseMode> (modeIdx);
+    const DenoiseMode requestedMode = static_cast<DenoiseMode> (modeIdx);
+    DenoiseMode mode = requestedMode;
 
     // HQ runs the heavy model only in offline (non-realtime) processing;
     // realtime playback of an HQ selection degrades to Live (DFN3).
@@ -283,18 +419,22 @@ void SyncTrackPrepProcessor::updateDspParams()
     else if (want != activeStage && prevStage == nullptr)
     {
         // Only crossfade out of an engine that may run against a realtime
-        // deadline; the HQ engine would run a 4 s ONNX window right here.
-        prevStage = (isNonRealtime() || activeStage->supportsRealtime())
+        // deadline; the HQ engine would run a 4 s ONNX window right here. Two
+        // engines with different content delays must not be blended because
+        // their samples refer to different points on the timeline.
+        const bool latencyMatches = want->getLatencySamples()
+                                    == activeStage->getLatencySamples();
+        prevStage = (latencyMatches
+                     && (isNonRealtime() || activeStage->supportsRealtime()))
                         ? activeStage : nullptr;
         activeStage = want;
         fadePos = 0;
     }
     if (activeStage != nullptr)
     {
-        // Hosts may ignore a mid-playback change (R5, changelog); the update
-        // itself is deferred to the message thread.
-        requestLatencyUpdate (activeStage->getLatencySamples()
-                              + truePeakLimiter.getLatencySamples());
+        // The effective engine owns the latency. A VST3-compliant host
+        // re-prepares the component when it changes processing mode.
+        requestLatencyUpdate (latencyForMode (mode));
     }
 }
 
@@ -322,6 +462,42 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
 
     updateDspParams();
+
+    const int winNow = activeStage == &mossStage ? mossStage.debugWindowsRun() : -1;
+    const bool traceThisBlock = traceFile != nullptr
+        && (traceBlockCount <= 48 || (traceBlockCount & 127) == 0
+            || traceBounceBlocks < 64 || (traceBounceBlocks & 127) == 0);
+    if (traceFile != nullptr && winNow != traceLastWin && traceLastWin >= 0)
+        tracef ("  window %d -> %d (bounce blk %d)", traceLastWin, winNow, traceBounceBlocks);
+    if (traceFile != nullptr && traceLastWin == 0 && winNow == 1)
+        tracef ("  window 0 ran: queue head+tail peak %.6f (silence if ~0) qin=%d",
+                (double) mossStage.debugQueueEdgePeak (192000, 48000),
+                mossStage.debugQueuedInput());
+    traceLastWin = winNow;
+
+    if (traceThisBlock)
+    {
+        if (activeStage == &mossStage)
+            tracef ("blk %d bounce %d n=%d in=%.5f nonRT=%d stage=moss win=%d served=%d qin=%d lat=%d",
+                    ++traceBlockCount, traceBounceBlocks, buffer.getNumSamples(), (double) inPeak,
+                    (int) isNonRealtime(), mossStage.debugWindowsRun(),
+                    mossStage.debugServedSamples(), mossStage.debugQueuedInput(),
+                    juce::AudioProcessor::getLatencySamples());
+        else
+            tracef ("blk %d bounce %d n=%d in=%.5f nonRT=%d stage=%s lat=%d",
+                    ++traceBlockCount, traceBounceBlocks, buffer.getNumSamples(), (double) inPeak,
+                    (int) isNonRealtime(),
+                    activeStage == &dfn3Stage ? "dfn3"
+                        : activeStage == &classicStage ? "classic" : "none",
+                    juce::AudioProcessor::getLatencySamples());
+    }
+    else
+    {
+        ++traceBlockCount;
+    }
+    ++traceBounceBlocks;
+
+    // Level before denoise so spectral stage can shave boosted floor (Clean)
 
     // Level before denoise so spectral stage can shave boosted floor (Clean)
     channelRepair.process (buffer);
@@ -398,6 +574,7 @@ void SyncTrackPrepProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void SyncTrackPrepProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    tracef ("setStateInformation (%d bytes)", sizeInBytes);
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
     {
         if (xml->hasTagName (apvts.state.getType()))

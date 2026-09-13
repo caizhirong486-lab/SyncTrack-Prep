@@ -76,7 +76,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 | DAW | 状态 |
 |---|---|
 | **Cubase** | ✅ 已验证 —— 实时与离线导出均稳定运行（在 macOS 上实测） |
-| **Nuendo** | ✅ 已验证 —— 实时与离线导出均稳定运行（在 macOS 上实测） |
+| **Nuendo** | ✅ 已验证 —— 实时与 HQ 离线（Direct Offline Processing）稳定（在 macOS 上实测）；HQ 不支持 **Audio Mixdown**（宿主会丢渲染头） |
 | Reaper | ⚠️ 未验证 |
 | FL Studio | ⚠️ 未验证 |
 | Studio One | ⚠️ 未验证 |
@@ -128,7 +128,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 
 这些提前讲清楚，能省掉一次 issue。
 
-* **HQ（MossFormer2）需要离线渲染。** 只有当宿主标明非实时（Nuendo 的 Direct Offline Processing、导出/bounce 路径）才会真正运行。实时回放时该 mode 会静默降级为 **Live (DFN3)** 并显示提示。HQ 比 Live 多 ~4 秒的宿主延迟补偿，宿主能吃下。
+* **HQ（MossFormer2）需要离线渲染 —— 请用 Direct Offline Processing。** 只有当宿主标明非实时才会真正运行。实时回放时该 mode 会静默降级为 **Live (DFN3)** 并显示提示。HQ 比 Live 多 ~4 秒的宿主延迟补偿；Nuendo 的 **F7 Direct Offline Processing** 能正确吸收（实测多次渲染逐字节一致）。**不要用 Audio Mixdown 导出 HQ**：Nuendo 的混音导出会把 ~4 秒延迟插件的头部填零约 3 秒、且尾部收集不全，导致掐头去尾——插件侧延迟/尾部上报已用插桩日志验证正确，这是宿主侧限制。变通办法：时间线上在素材前后各垫 ≥4 秒静音，bounce 后裁剪。
 * **Classic（自研频谱）在真实素材上的稳态降噪量可能不大。** 合成稳态噪声上明显，真实房间底噪上效果偏温和。底噪是主要问题时请选 **Live（DFN3）** 或 **HQ（MossFormer2）**。
 * **Classic 噪声估计器需要约一秒才稳定。** 它是在流中学习噪声频谱的，所以如果一段素材开头就是人声，最初几个 STFT 帧可能会把对白当成噪声学进去。大约一秒内会自行纠正。
 * **v0.1.x 的旧工程加载会发生漂移。** 新 **Output** 范围是 −inf…+24 dB（skewed，0 dB 居中）—— 旧范围 −24…+12 把 0 dB 存在归一化值 0.667，新映射是 0.5，所以旧的 Output 值读数会偏。旧工程里用 Denoise 复选框的，加载时会变成 **Live (DFN3)**。两者都是有意的升级映射，不是 bug。

@@ -56,7 +56,7 @@ inline DenoiseMode denoiseModeDefault (int index)
 {
     switch (index)
     {
-        case strong: return DenoiseMode::hq;
+        case strong: return DenoiseMode::live;
         case clean:  return DenoiseMode::classic;
         default:     return DenoiseMode::off;
     }

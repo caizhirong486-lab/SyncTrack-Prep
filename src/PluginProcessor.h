@@ -33,7 +33,12 @@ public:
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override;
+    /** The VST3 wrapper flips realtime/offline here (setupProcessing) without
+        re-preparing when rate and block size are unchanged. Publish the
+        engine's latency for the new mode synchronously so an offline HQ render
+        never starts with a stale realtime latency. */
+    void setNonRealtime (bool shouldBeNonRealtime) noexcept override;
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -74,6 +79,7 @@ private:
         processBlock. */
     void handleAsyncUpdate() override;
     void requestLatencyUpdate (int samples);
+    int latencyForMode (DenoiseMode mode);
     DenoiseStage* stageForMode (DenoiseMode mode);
 
     ChannelRepair channelRepair;
@@ -106,12 +112,27 @@ private:
     bool isLoadingState = false;
 
     std::atomic<bool> hqDegraded { false };
+    std::atomic<bool> dspPrepared { false };
     std::atomic<int> pendingLatency { -1 };
     std::atomic<float> inputPeak { 0.0f };
     std::atomic<float> outputPeak { 0.0f };
     std::atomic<float> grDb { 0.0f };
 
     juce::AudioBuffer<float> dryBypass;
+
+    // Forensics trace: inert unless /tmp/synctrackprep_trace.enable exists at
+    // construction; appends to /tmp/synctrackprep_trace.log. Single-fwrite
+    // lines keep interleaved instances readable without a lock.
+    void tracef (const char* fmt, ...) const noexcept;
+    static std::atomic<int> traceInstanceCounter;
+    std::FILE* traceFile = nullptr;
+    int traceInstance = 0;
+    int traceBlockCount = 0;
+    int traceBounceBlocks = 0;
+    int traceLastWin = -1;
+    int traceNonRtRepeats = 0;
+    mutable int traceLatencyReads = 0;
+    mutable int traceTailReads = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SyncTrackPrepProcessor)
 };

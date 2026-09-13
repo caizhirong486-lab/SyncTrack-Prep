@@ -38,6 +38,26 @@ public:
     bool supportsRealtime() const override { return false; }
     bool isLoaded() const { return session != nullptr; }
 
+    /** Forensics (STP trace): window progress, queued input and priming state. */
+    int debugWindowsRun() const { return windowsRun; }
+    int debugServedSamples() const { return servedSession.empty() ? 0 : servedSession[0]; }
+    int debugQueuedInput() const { return in48.empty() ? 0 : (int) in48[0].size(); }
+    bool debugActive() const { return active; }
+    /** Peak over the first `head` and the last `tail` samples of the channel-0
+        input queue — distinguishes preroll silence from real material. */
+    float debugQueueEdgePeak (int head, int tail) const
+    {
+        if (in48.empty()) return 0.0f;
+        const auto& q = in48[0];
+        float p = 0.0f;
+        const int n = (int) q.size();
+        for (int i = 0; i < juce::jmin (head, n); ++i)
+            p = juce::jmax (p, std::abs (q[(size_t) i]));
+        for (int i = juce::jmax (0, n - tail); i < n; ++i)
+            p = juce::jmax (p, std::abs (q[(size_t) i]));
+        return p;
+    }
+
     /** 4 s window, 3 s stride at 48 kHz — identical to the ClearerVoice
         reference decode (no leading pad; the first chunk discards only its
         tail, later chunks discard 0.5 s from each edge). */
