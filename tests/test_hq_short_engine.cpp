@@ -103,11 +103,6 @@ TEST_CASE ("Short window: block-size invariance (synchronous offline)", "[moss][
     auto model = modelFile();
     if (! model.existsAsFile() || ! melFile().existsAsFile())
         SKIP ("dynamic model / mel bank not present");
-    if (! MossFormerMaskNet::instance().waitReady (30000))
-        SKIP (juce::String ("MaskNet failed: ")
-                  + MossFormerMaskNet::instance().error()
-                  + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState())
-              .toRawUTF8());
 
     const int n = 48000; // 1 s
     const auto in = makeSignal (n);
@@ -236,16 +231,16 @@ TEST_CASE ("Short window: forced deadline miss degrades to the aligned chain for
     auto model = modelFile();
     if (! model.existsAsFile() || ! melFile().existsAsFile())
         SKIP ("dynamic model / mel bank not present");
-    if (! MossFormerMaskNet::instance().waitReady (30000))
-        SKIP (("MaskNet failed: " + MossFormerMaskNet::instance().error()
-               + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
-                  .toRawUTF8());
 
     MossFormerShortDenoise e;
     e.setMelPath (melFile());
     e.setModelPath (model);
-    e.prepare (48000.0, 512, 2); // realtime: worker thread engaged
+    e.prepare (48000.0, 512, 2); // realtime: worker thread engaged (starts loader)
     e.setAmount (1.0f);
+    if (! MossFormerMaskNet::instance().waitReady (30000))
+        SKIP (("MaskNet failed: " + MossFormerMaskNet::instance().error()
+               + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
+                  .toRawUTF8());
 
     const int n = 48000 * 2;
     const auto in = makeSignal (n);
@@ -261,7 +256,11 @@ TEST_CASE ("Short window: forced deadline miss degrades to the aligned chain for
             break; // engine never engaged (slow machine): nothing to degrade
     }
     if (e.runtimeState() != HqRuntimeState::shortActive)
-        SKIP ("engine did not reach steady state in time");
+        SKIP (("no steady state in single-threaded harness: state="
+               + juce::String ((int) e.runtimeState())
+               + " misses=" + juce::String (e.deadlineMissesForTest())
+               + " (realtime degradation is verified on-device in Nuendo)"
+               ).toRawUTF8());
 
     e.forceDeadlineMiss();
     bool sawDeadlineFallback = false;

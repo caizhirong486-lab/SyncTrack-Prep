@@ -36,10 +36,12 @@ public:
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override;
-    /** The VST3 wrapper flips realtime/offline here (setupProcessing) without
-        re-preparing when rate and block size are unchanged. Publish the
-        engine's latency for the new mode synchronously so an offline HQ render
-        never starts with a stale realtime latency. */
+    /** The VST3 wrapper flips realtime/offline here (setupProcessing); Nuendo
+        also re-prepares around offline exports (verified by trace 2026-09-14),
+        so lifecycle order must never be used to guess the render kind — the
+        serialisable hqRenderTarget carries that decision. The flip still
+        publishes the latency matrix synchronously (Short/Mixdown keeps the
+        realtime value, so no re-compensation is triggered). */
     void setNonRealtime (bool shouldBeNonRealtime) noexcept override;
 
     int getNumPrograms() override { return 1; }

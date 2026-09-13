@@ -23,7 +23,7 @@ if [ ! -f "$CKPT" ]; then
 fi
 
 # --- Export FP32 ONNX (needs python3.13 venv with torch; see plan Step 1b) ---
-ONNX="$ROOT/third_party/mossformer2/mossformer2_fp32.onnx"
+ONNX="$ROOT/third_party/mossformer2/mossformer2_dynamic.onnx"
 if [ ! -f "$ONNX" ]; then
     python3 scripts/export_mossformer2_onnx.py \
         --checkpoint "$CKPT" --output "$ONNX" --window 192000

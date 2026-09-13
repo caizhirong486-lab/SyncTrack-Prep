@@ -70,6 +70,14 @@ public:
     /** Test hook: count the next steady-state window as a deadline miss. */
     void forceDeadlineMiss() { forceMiss.store (true, std::memory_order_relaxed); }
 
+    /** Test hooks (diagnostics only). */
+    int deadlineMissesForTest() const { return deadlineMisses.load(); }
+    HqRuntimeState debugStateForTest() const { return state.load(); }
+    std::int64_t debugRingBacklog() const
+    {
+        return hqOut48[0].written() - hqOut48[0].r.load (std::memory_order_relaxed);
+    }
+
     static constexpr int win48 = 7680;      // 160 ms
     static constexpr int stride48 = 5760;   // 120 ms = 15 fbank hops
     static constexpr int trim48 = 960;      // 20 ms
@@ -146,7 +154,7 @@ private:
     std::thread worker;
     std::mutex workerMutex;
     std::condition_variable workerCv;
-    bool workerRunning = false;
+    std::atomic<bool> workerRunning { false };
     std::array<Ring, 2> in48;                // audio -> worker (48k domain)
 
     MossFormerFrontend::Scratch scratch;

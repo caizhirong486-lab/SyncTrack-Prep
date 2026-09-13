@@ -36,8 +36,11 @@ namespace
     entry point in this code base is the host's main thread. */
 Ort::Env& sharedEnv()
 {
-    static Ort::Env env (ORT_LOGGING_LEVEL_WARNING, "SyncTrackPrep-MossFormerDynamic");
-    return env;
+    // Deliberately leaked: the static-destruction order would tear the Env
+    // down before the Session that still references it.
+    static Ort::Env* env = new Ort::Env (ORT_LOGGING_LEVEL_WARNING,
+                                         "SyncTrackPrep-MossFormerDynamic");
+    return *env;
 }
 } // namespace
 

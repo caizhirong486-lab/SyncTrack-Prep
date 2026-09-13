@@ -20,7 +20,7 @@ When you import production audio from a camera or field recorder into a video-po
 In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain → UpwardExpander → PeakCompressor → TruePeakLimiter → Out
 ```
 
-* **DenoiseStage** is selectable via the **Denoise Mode** control: **Off** (no suppression), **Classic** (in-house spectral STFT/OLA, latency 575), **Live (DFN3)** (DeepFilterNet3 / libDF, realtime, ~30 ms), or **HQ (MossFormer2)** (MossFormer2_SE_48K via ONNX Runtime, offline render only, 4 s lookahead). Latency is reported per mode, so hosts compensate correctly.
+* **DenoiseStage** is selectable via the **Denoise Mode** control: **Off** (no suppression), **Classic** (in-house spectral STFT/OLA, latency 575), **Live (DFN3)** (DeepFilterNet3 / libDF, realtime, ~30 ms), or **HQ (MossFormer2)** (MossFormer2_SE_48K via ONNX Runtime — 160 ms short window at the fixed 250 ms latency in realtime and Audio Mixdown, 4 s DOP window offline when the HQ Render target is set to 4 s DOP). Latency is reported per mode, so hosts compensate correctly.
 * The leveler sits *before* the denoiser on purpose: when the spectral stage lifts quiet content first, the chosen denoiser can then shave the floor back down.
 * The leveler publishes a per-sample post-gain *scene level*, indexed by both the compressor and the upward expander — so dynamics follow the level the listener actually hears, not the input snapshot.
 * **Output is the chain's makeup gain**, placed *ahead* of the always-on safety stages. The −1 dBTP ceiling therefore holds at *any* knob position: turning Output up lifts quiet content until it meets the ceiling, and anything that would exceed it is clamped by the compressor and limiter. At 0 dB the chain behaves as if the knob were not there.
@@ -37,7 +37,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 | **Upward expander** | Low-level expansion: lifts the noise floor *downward* in quiet sections so the chain doesn't squash quiet dialogue. Threshold is scene-coupled, not input-coupled. |
 | **Tone shaper** | Tilt shelf + 3 kHz presence peak; a single Tone knob rotates between −1 (warmer/duller) and +1 (brighter/forward). Strict bit-transparent at 0. |
 | **True-peak ceiling** | Maximum allowed true-peak level (−1 dBTP). |
-| **Denoise mode** | Selectable denoise engine: Off / Classic (in-house spectral STFT) / Live (DeepFilterNet3, realtime) / HQ (MossFormer2, offline only). The Amount knob maps to "denoise strength" inside whichever engine is selected. |
+| **Denoise mode** | Selectable denoise engine: Off / Classic (in-house spectral STFT) / Live (DeepFilterNet3, realtime) / HQ (MossFormer2: 160 ms short window in realtime + Mixdown, 4 s window in F7 DOP). The Amount knob maps to "denoise strength" inside whichever engine is selected. |
 | **Dialogue intelligibility** | Whether production speech is understandable under a music bed. This is the product's success criterion — *not* broadcast LUFS compliance. |
 
 ---
@@ -76,7 +76,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 | DAW | Status |
 |---|---|
 | **Cubase** | ✅ Verified — runs stably in real time and in offline bounce (tested on macOS) |
-| **Nuendo** | ✅ Verified — realtime and HQ offline via Direct Offline Processing (macOS); HQ under **Audio Mixdown** is not supported (host drops the render head) |
+| **Nuendo** | ✅ Verified — realtime, HQ Audio Mixdown (short window) and HQ F7 Direct Offline Processing (4 s window) on macOS; the HQ Lab build is pending on-device gray testing |
 | Reaper | ⚠️ Not verified |
 | FL Studio | ⚠️ Not verified |
 | Studio One | ⚠️ Not verified |
@@ -128,7 +128,8 @@ Only stereo in / stereo out is supported.
 
 Being upfront about these will save you an issue report.
 
-* **HQ (MossFormer2) requires offline rendering — use Direct Offline Processing.** It runs only when the host signals non-realtime. During realtime playback the chain silently degrades to **Live (DFN3)** and the editor shows a hint. Plan ~4s of extra reported latency for HQ, which hosts absorb correctly in Nuendo's **F7 Direct Offline Processing** (verified byte-stable across runs). Do not use the **Audio Mixdown** export with HQ: Nuendo's mixdown engine zero-fills the first ~3 s of a ~4 s-latency offline insert and under-collects its tail, so the render loses the head and tail — the plug-in reports latency and tail correctly (verified with an instrumented trace), this is a host-side limitation. A workaround is padding ≥4 s of silence before and after the material on the timeline, bouncing, and trimming.
+* **HQ (MossFormer2) now runs in realtime and Audio Mixdown through a 160 ms short window** at a fixed 250 ms plugin latency; **F7 Direct Offline Processing** uses the historical 4 s window when the editor's **HQ Render** switch is set to `4 s DOP` (switch is locked during playback; offline CLI default is `dop4s`). HQ keeps an aligned DFN3 chain running underneath: model loading, seeks, cycle wraps and CPU overload degrade to it through a 15 ms crossfade **without changing the reported latency**. Only one instance renders realtime HQ per host process; a second HQ instance deterministically serves the aligned DFN3 chain. The 4 s Audio-Mixdown head/tail loss of v0.2 (a host-side rendering path) no longer applies to the short-window Mixdown.
+* **HQ Render targets are explicit** because Nuendo re-prepares on every offline export: `Short / Mixdown` (default for new instances) and `4 s DOP` (migrated default for v0.2 sessions that had HQ selected).
 * **Classical spectral denoise on real material can be undramatic** when no NN tier is active. The in-house Classic denoiser is great on synth steady noise but quiet on real room tone; pick **Live** (DFN3) or **HQ** (MossFormer2) when the noise is the primary problem.
 * **The noise estimator in Classic needs about a second to settle.** It learns the noise spectrum mid-stream, so if a clip opens on speech the first few STFT frames can briefly learn dialogue instead of noise. It self-corrects in roughly one second.
 * **Saved sessions from v0.1.x load shifted.** The new **Output** range is −inf…+24 dB (skewed, 0 dB at the centre) — the old −24…+12 range stored 0 dB at a different normalised position, so existing Output values load different. Legacy projects that used the Denoise on/off checkbox now open with denoise on ⇒ **Live (DFN3)**. Both are documented upgrade mappings, not bugs.
@@ -179,7 +180,7 @@ cmake --build build -j 8 --target SyncTrackPrepOffline
 ./build/SyncTrackPrepOffline input.wav output-strong.wav strong 1
 ```
 
-Arguments: `<in.wav> <out.wav> [soft|strong|clean] [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]` plus `--tap denoise|final`, `--expander 0|1`, `--flush <seconds>`, `--dfn3 <model.tar.gz>`, `--moss <model.onnx>`.
+Arguments: `<in.wav> <out.wav> [soft|strong|clean] [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]` plus `--tap denoise|final`, `--expander 0|1`, `--flush <seconds>`, `--dfn3 <model.tar.gz>`, `--moss <model-dir>`, `--hq-render short|dop4s` (default `dop4s`).
 
 Three analysis helpers live in `scripts/` (Python 3; `analyze_ab.py` and `diagnose_stereo_noise.py` need `ffmpeg` on your `PATH`):
 

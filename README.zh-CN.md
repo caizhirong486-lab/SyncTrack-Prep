@@ -223,3 +223,11 @@ SyncTrack Prep 以 **GNU Affero 通用公共许可证 v3.0 或更高版本**（A
 * **MossFormer2_SE_48K** 权重 —— Apache-2.0。HQ 档模型，打包进 VST3 的 `Contents/Resources/mossformer2/`。
 
 VST 是 Steinberg Media Technologies GmbH 在欧洲及其他国家的注册商标。
+
+
+## HQ Lab（本分支）
+
+- 实时与 Audio Mixdown 走 160 ms 短窗，插件总延迟固定 250 ms；F7 DOP 在编辑器 HQ Render 选 `4 s DOP` 时沿用历史 4 s 窗（播放中不可切换）。
+- HQ 恒并行一条对齐 DFN3 链：加载、seek、Cycle、过载时 15 ms 等功率交叉降级，宿主可见延迟不变。
+- 单宿主进程内仅允许一个实时 HQ 实例；第二实例确定性使用对齐 DFN3。
+- 实验身份 `SyncTrack Prep HQ Lab`（Plugin Code `StHL`），与正式版并存；验收通过后恢复正式身份。

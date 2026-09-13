@@ -163,10 +163,12 @@ void MossFormerFrontend::computeFeats (const Constants& c, Scratch& s,
                     std::fill (dith.begin(), dith.end(), 0.0f);
             }
         }
-        // int16 domain, dither injected before remove_dc_offset
+        // int16 domain: the signal is scaled up, the kaldi dither is NOT
+        // (torchaudio adds unit-variance noise in the int16 domain directly).
         float frame32 [kWinLen];
         for (int i = 0; i < kWinLen; ++i)
-            frame32[i] = (src[i] + (plan != nullptr ? dith[(size_t) i] : 0.0f)) * 32768.0f;
+            frame32[i] = src[i] * 32768.0f
+                         + (plan != nullptr ? dith[(size_t) i] : 0.0f);
 
         // remove_dc_offset
         double mean = 0.0;

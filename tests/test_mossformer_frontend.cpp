@@ -109,6 +109,11 @@ TEST_CASE ("MossFormer waveform contract matches the official int16-domain decod
     constexpr int n = sr * 8;
     MossFormerDenoise den;
     den.setModelPath (model);
+    den.setMelPath (juce::File::getCurrentWorkingDirectory()
+                        .getChildFile ("third_party/mossformer2/mel60_2048.f32"));
+    den.setDopDitherPath (juce::File::getCurrentWorkingDirectory()
+                              .getChildFile ("third_party/mossformer2/dop_dither.f32"));
+    den.setSyncWait (true);
     den.prepare ((double) sr, 512, 1);
     REQUIRE (den.isLoaded());
 

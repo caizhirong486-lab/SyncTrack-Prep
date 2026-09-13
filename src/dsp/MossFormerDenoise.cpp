@@ -83,9 +83,11 @@ bool MossFormerDenoise::runWindow (int w)
     const int emitLen = window48 - trim48 - emitOffset;
 
     // Assemble both channel windows; the shared MaskNet takes batch 2.
+    // Mono sessions duplicate channel 0 into the batch (bit-identical to a
+    // per-channel pass, verified by the batch equivalence probe).
     for (int ch = 0; ch < 2; ++ch)
     {
-        auto& q = in48[(size_t) ch];
+        auto& q = in48[(size_t) juce::jmin (ch, numCh - 1)];
         if ((int) q.size() < window48)
             return false;
         std::memcpy (winBuf[(size_t) ch].data(), q.data(), (size_t) window48 * sizeof (float));
@@ -100,18 +102,15 @@ bool MossFormerDenoise::runWindow (int w)
 
     MossFormerFrontend::renderWet (*constants, scratch, winBuf, mask, wetBuf,
                                    amount01, framesPerDop, window48, trim48, emitOffset);
-    for (int ch = 0; ch < 2; ++ch)
+    const int stereoCh = juce::jmin (2, numCh);
+    for (int ch = 0; ch < stereoCh; ++ch)
         out48[(size_t) ch].insert (out48[(size_t) ch].end(),
                                    wetBuf[(size_t) ch].data(),
                                    wetBuf[(size_t) ch].data() + emitLen);
-    if (numCh > 2)
-    {
-        // channels beyond stereo duplicate channel 1 (bus layout safety)
-        for (int ch = 2; ch < numCh; ++ch)
-            out48[(size_t) ch].insert (out48[(size_t) ch].end(),
-                                       wetBuf[1].data(),
-                                       wetBuf[1].data() + emitLen);
-    }
+    for (int ch = 2; ch < numCh; ++ch) // extra channels duplicate channel 1
+        out48[(size_t) ch].insert (out48[(size_t) ch].end(),
+                                   wetBuf[1].data(),
+                                   wetBuf[1].data() + emitLen);
     // Drop the consumed stride so the next window starts at the next 3 s
     // position (the overlap region is re-read by construction).
     for (auto& q : in48)
