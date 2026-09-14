@@ -616,10 +616,15 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                     leaseRejectedForPlayback = true;
             }
 
+            // Capacity fallback is lease-driven only: it applies once the
+            // token was rejected (another instance owns realtime), never when
+            // this instance simply has no host playhead to acquire with.
             if (leaseId == self && HqInstanceLease::owner() == self)
                 mossShort.setCapacityFallback (false);
             else if (leaseRejectedForPlayback)
                 mossShort.setCapacityFallback (true);
+            else
+                mossShort.setCapacityFallback (false);
 
             // A rejected instance does not retry while this playback remains
             // continuous. Stop/start creates the next acquisition boundary.

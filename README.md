@@ -67,7 +67,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 2. Move `SyncTrack Prep.vst3` into `C:\Program Files\Common Files\VST3\` (you will need administrator rights).
 3. Restart your DAW and rescan VST3 plug-ins.
 
-> The Windows binary is verified by an external grey-tester running Nuendo on Windows; see [Known limitations](#known-limitations) for the residual gaps.
+> The released Windows binary was verified by an external Nuendo grey-tester. The HQ Lab short-window path still needs the Windows p99/block-size/10-minute gate below.
 
 ---
 
@@ -76,7 +76,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 | DAW | Status |
 |---|---|
 | **Cubase** | ✅ Verified — runs stably in real time and in offline bounce (tested on macOS) |
-| **Nuendo** | ✅ Verified — realtime, HQ Audio Mixdown (short window) and HQ F7 Direct Offline Processing (4 s window) on macOS; the HQ Lab build is pending on-device gray testing |
+| **Nuendo** | ⚠️ Existing realtime and 4 s F7 DOP paths are verified on macOS. The HQ Lab realtime/Short Mixdown path is implemented but still awaits the Play/Stop/seek/Cycle, head/tail, two-instance and overload checks below. |
 | Reaper | ⚠️ Not verified |
 | FL Studio | ⚠️ Not verified |
 | Studio One | ⚠️ Not verified |
@@ -104,7 +104,7 @@ There are six controls, and that is deliberate — the presets carry the tuning.
 | Control | Range | Notes |
 |---|---|---|
 | **Preset** | Soft / Strong / Clean | Default **Strong**. Switching preset also sets the denoise-mode default (Soft=Off, Strong=Live, Clean=Classic); your manual mode choice is kept until you switch preset again. |
-| **Denoise Mode** | Off / Classic / Live (DFN3) / HQ (MossFormer2) | Classic = in-house spectral. Live = realtime NN. HQ = offline NN (during playback it silently degrades to Live and shows a hint). |
+| **Denoise Mode** | Off / Classic / Live (DFN3) / HQ (MossFormer2) | Classic = in-house spectral. Live = realtime NN. HQ = realtime/Short Mixdown short-window NN, or the explicitly selected 4 s F7 DOP path. |
 | **Amount** | 0–100 % | Unified "denoise strength": maps to over-subtraction in Classic, attenuation limit in Live, wet/dry mix in HQ. |
 | **Tone** | −1 … +1 | Tilt + presence at 3 kHz; bit-transparent at 0. |
 | **Output** | −inf … +24 dB | Makeup gain ahead of the safety stages. Skewed range with 0 dB at the centre; reads "-inf" below −60 dB. The −1 dBTP ceiling always holds. |
@@ -128,7 +128,7 @@ Only stereo in / stereo out is supported.
 
 Being upfront about these will save you an issue report.
 
-* **HQ (MossFormer2) now runs in realtime and Audio Mixdown through a 160 ms short window** at a fixed 250 ms plugin latency; **F7 Direct Offline Processing** uses the historical 4 s window when the editor's **HQ Render** switch is set to `4 s DOP` (switch is locked during playback; offline CLI default is `dop4s`). HQ keeps an aligned DFN3 chain running underneath: model loading, seeks, cycle wraps and CPU overload degrade to it through a 15 ms crossfade **without changing the reported latency**. Only one instance renders realtime HQ per host process; a second HQ instance deterministically serves the aligned DFN3 chain. The 4 s Audio-Mixdown head/tail loss of v0.2 (a host-side rendering path) no longer applies to the short-window Mixdown.
+* **HQ (MossFormer2) now runs in realtime and Audio Mixdown through a 160 ms short window** at a fixed 250 ms plugin latency; **F7 Direct Offline Processing** uses the historical 4 s window when the editor's **HQ Render** switch is set to `4 s DOP` (switch is locked during playback; offline CLI default is `dop4s`). HQ keeps an aligned DFN3 chain running underneath: model loading, seeks, cycle wraps and CPU overload degrade to it through a 15 ms complementary raised-cosine crossfade **without changing the reported latency**. Only one instance renders realtime HQ per host process; a second HQ instance deterministically serves the aligned DFN3 chain. This design avoids the old 4 s Mixdown contract, but the new Short Mixdown head/tail result is not accepted until the Nuendo checks below pass.
 * **HQ Render targets are explicit** because Nuendo re-prepares on every offline export: `Short / Mixdown` (default for new instances) and `4 s DOP` (migrated default for v0.2 sessions that had HQ selected).
 * **Classical spectral denoise on real material can be undramatic** when no NN tier is active. The in-house Classic denoiser is great on synth steady noise but quiet on real room tone; pick **Live** (DFN3) or **HQ** (MossFormer2) when the noise is the primary problem.
 * **The noise estimator in Classic needs about a second to settle.** It learns the noise spectrum mid-stream, so if a clip opens on speech the first few STFT frames can briefly learn dialogue instead of noise. It self-corrects in roughly one second.
@@ -149,6 +149,15 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8
 ctest --test-dir build --output-on-failure
 ```
+
+For an NN acceptance build, first reproduce both MossFormer graphs and their resources with a ClearerVoice Python environment, then enable the strict gate:
+
+```bash
+STP_PYTHON_BIN=/path/to/clearervoice/venv/bin/python ./scripts/fetch_models.sh
+cmake -B build -DSTP_REQUIRE_NN=ON
+```
+
+`STP_REQUIRE_NN=ON` fails configure if DFN3, ORT, the dynamic graph, the retired DOP gold graph, mel bank or dither table is absent; it also turns NN test skips into failures.
 
 On macOS this produces a Universal 2 (arm64 + x86_64) binary. `COPY_PLUGIN_AFTER_BUILD` is on, so the VST3 is copied into your user plug-in folder as part of the build.
 
@@ -197,11 +206,13 @@ python3 scripts/diagnose_stereo_noise.py --gold input.wav
 
 `analyze_ab.py` writes a per-second CSV, a one-row aggregate CSV with pass/fail flags, and a readable Markdown report.
 
+HQ listening acceptance uses two separate Amount groups, 100% and 45%, because HQ is a waveform wet/dry mix while DFN3 maps Amount to an attenuation limit. Compare Short HQ, DFN3 and 4 s HQ with `--tap denoise --expander 0`; record all four explicit analysis settings (`--noise-window`, `--window`, `--proc-trim-start`, `--trim-end`) for every run. On macOS and Windows, the realtime gate is p99 inference below 100 ms plus host block-size invariance and a 10-minute run. Nuendo acceptance additionally covers 44.1/48 kHz Play/Stop/seek/Cycle, Short Mixdown head/tail (first-sample error at most 128 samples), DOP→realtime fallback, two instances and forced overload.
+
 ---
 
 ## Roadmap
 
-* Stream-ify MossFormer2 — causal conversion + INT8 re-attempt — so HQ can become a realtime Live tier
+* Complete Nuendo and Windows acceptance for the HQ Lab short-window engine, then promote its experimental identity
 * AAX (Pro Tools) and AU (Logic Pro) builds
 * Validate against Reaper, FL Studio and Studio One
 * More Linux coverage (LV2 / CLAP)
