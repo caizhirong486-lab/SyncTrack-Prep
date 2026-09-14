@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SyncTrackPrep VERSION 0.2.0)
+project(SyncTrackPrep VERSION 0.3.0)
 
 if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build architectures for Mac OS X" FORCE)
@@ -135,11 +135,9 @@ juce_add_plugin(SyncTrackPrep
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD ${STP_JUCE_COPY_AFTER_BUILD}
     PLUGIN_MANUFACTURER_CODE Wosm
-    # HQ Lab identity (plan: parallel installation next to the official
-    # "SyncTrack Prep"; restored to Stp1/official name when promoting).
-    PLUGIN_CODE StHL
+    PLUGIN_CODE Stp1
     FORMATS VST3 Standalone
-    PRODUCT_NAME "SyncTrack Prep HQ Lab"
+    PRODUCT_NAME "SyncTrack Prep"
 )
 
 juce_generate_juce_header(SyncTrackPrep)
@@ -207,12 +205,6 @@ function(stp_link_nn_engines TARGET IS_BUNDLE)
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mossformer2/dop_dither.f32"
                         "$<TARGET_FILE_DIR:${ART}>/../Resources/mossformer2/")
-            endif()
-            if(APPLE)
-                add_custom_command(TARGET ${ART} POST_BUILD
-                    COMMAND /usr/libexec/PlistBuddy -c
-                        "Set :CFBundleIdentifier com.wosmai.SyncTrackPrepHQLab"
-                        "$<TARGET_FILE_DIR:${ART}>/../Info.plist")
             endif()
             if(APPLE AND STP_HAVE_MOSSFORMER)
                 add_custom_command(TARGET ${ART} POST_BUILD
