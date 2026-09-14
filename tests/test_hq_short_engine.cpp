@@ -269,6 +269,74 @@ TEST_CASE ("Short window: Amount 0% is the delay-compensated dry signal", "[moss
     REQUIRE (maxDiff <= 1.0e-6);
 }
 
+TEST_CASE ("Short window: realtime stream preserves the delayed timeline", "[moss][short][realtime]")
+{
+    auto model = modelFile();
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile()
+                            && dfn3File().existsAsFile(),
+                        "dynamic model / mel bank / DFN3 not present");
+
+    Dfn3Denoise dfn3;
+    dfn3.setModelPath (dfn3File());
+    dfn3.prepare (48000.0, 512, 2);
+    dfn3.setAmount (0.0f);
+
+    MossFormerShortDenoise e;
+    e.setMelPath (melFile());
+    e.setModelPath (model);
+    e.attachDfn3 (&dfn3);
+    e.setAmount (0.0f);
+    e.prepare (48000.0, 512, 2);
+    stpRequireNnOrSkip (MossFormerMaskNet::instance().waitReady (30000),
+                        "MaskNet failed to load");
+
+    constexpr int n = 48000 * 2;
+    const auto in = makeSignal (n);
+    juce::AudioBuffer<float> out (2, n);
+    juce::AudioBuffer<float> slice (2, 512);
+    bool sawShortActive = false;
+
+    for (int off = 0; off < n; off += 512)
+    {
+        const int len = juce::jmin (512, n - off);
+        slice.setSize (2, len, false, false, true);
+        for (int ch = 0; ch < 2; ++ch)
+            slice.copyFrom (ch, 0, in, ch, off, len);
+        e.process (slice);
+        for (int ch = 0; ch < 2; ++ch)
+            out.copyFrom (ch, off, slice, ch, 0, len);
+        sawShortActive = sawShortActive || e.runtimeState() == HqRuntimeState::shortActive;
+        std::this_thread::sleep_for (std::chrono::milliseconds (11));
+    }
+
+    REQUIRE (sawShortActive);
+    const int latency = e.getLatencySamples();
+    double maxDiff = 0.0;
+    int maxDiffAt = 0;
+    int maxDiffCh = 0;
+    int firstDiffAt = -1;
+    for (int i = latency; i < n; ++i)
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const double diff = (double) std::abs (out.getSample (ch, i)
+                                                   - in.getSample (ch, i - latency));
+            if (firstDiffAt < 0 && diff > 1.0e-6)
+                firstDiffAt = i;
+            if (diff > maxDiff)
+            {
+                maxDiff = diff;
+                maxDiffAt = i;
+                maxDiffCh = ch;
+            }
+        }
+    INFO ("realtime Amount=0 delayed-dry max diff " << maxDiff
+          << " at ch " << maxDiffCh << " sample " << maxDiffAt
+          << ", first diff " << firstDiffAt
+          << ", state " << (int) e.runtimeState()
+          << ", windows " << e.windowsStartedForTest());
+    REQUIRE (maxDiff <= 1.0e-6);
+}
+
 TEST_CASE ("Short window: forced deadline miss degrades to the aligned chain for one generation", "[moss][short]")
 {
     auto model = modelFile();

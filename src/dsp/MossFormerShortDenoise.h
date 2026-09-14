@@ -70,6 +70,9 @@ public:
     /** Test hook: count the next steady-state window as a deadline miss. */
     void forceDeadlineMiss() { forceMiss.store (true, std::memory_order_relaxed); }
 
+    /** Lightweight forensic trace (append-only, inert unless enabled). */
+    static void tracef (const char* fmt, ...) noexcept;
+
     /** Test hooks (diagnostics only). */
     int deadlineMissesForTest() const { return deadlineMisses.load(); }
     int windowsStartedForTest() const { return windowsStarted.load(); }

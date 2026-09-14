@@ -4,11 +4,31 @@
 #include "Dfn3Denoise.h"
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 
 #ifdef STP_ENABLE_MOSSFORMER
+
+void MossFormerShortDenoise::tracef (const char* fmt, ...) noexcept
+{
+    if (! juce::File ("/tmp/hq_short_trace.enable").existsAsFile())
+        return;
+    auto* f = std::fopen ("/tmp/hq_short_trace.log", "a");
+    if (f == nullptr)
+        return;
+    char line [384];
+    va_list args;
+    va_start (args, fmt);
+    std::vsnprintf (line, sizeof (line), fmt, args);
+    va_end (args);
+    std::fwrite (line, 1, std::strlen (line), f);
+    std::fwrite ("\n", 1, 1, f);
+    std::fflush (f);
+    std::fclose (f);
+}
 
 namespace
 {
@@ -61,7 +81,7 @@ void MossFormerShortDenoise::prepare (double sampleRate, int maxBlock, int numCh
 
     resampler.prepare (sessionRate, numCh, maxBlockSession);
     resample = resampler.isActive();
-    hqResampler.prepare (sessionRate, numCh, maxBlockSession);
+    hqResampler.prepare (sessionRate, numCh, win48);
 
     const int block48 = (int) std::ceil ((double) maxBlockSession
                                          / juce::jmax (0.01, sessionRate / engineRate)) + 64;
@@ -172,9 +192,14 @@ void MossFormerShortDenoise::bumpGeneration (std::int64_t sessionStart)
                      std::memory_order_relaxed);
     }
     served = 0;
-    fadePos = 0;
-    fadeOutPos = -1;
-    hqEngaged = false;
+    // An in-progress crossfade is allowed to finish: resetting it here would
+    // make the mix gain jump at the next block (audible click on seek/Cycle).
+    if (! hqEngaged || (fadePos >= fadeLen && fadeOutPos < 0))
+    {
+        fadePos = 0;
+        fadeOutPos = -1;
+        hqEngaged = false;
+    }
     syncWinK = 0;
     syncWritten = 0;
     syncWrittenCh = { 0, 0 };
@@ -222,7 +247,12 @@ void MossFormerShortDenoise::setCapacityFallback (bool on)
 HqRuntimeState MossFormerShortDenoise::runtimeState() const
 {
     if (capacityFallback.load (std::memory_order_relaxed))
+    {
+        static std::atomic<bool> logged { false };
+        if (! logged.exchange (true))
+            tracef ("[hq-short] capacity fallback active");
         return HqRuntimeState::fallbackCapacity;
+    }
     return state.load (std::memory_order_relaxed);
 }
 
@@ -253,7 +283,7 @@ bool MossFormerShortDenoise::runWindow (int winK, std::uint64_t frameBase,
                 ring.buf[(std::size_t) ((epochStartW + readCursor + filled
                                          - (winK == 0 ? pad0 : 0)) % cap)];
     }
-    readCursor += win48 - (winK == 0 ? pad0 : 0);
+    readCursor += stride48 - (winK == 0 ? pad0 : 0);
 
     windowsStarted.fetch_add (1, std::memory_order_relaxed);
     if (! MossFormerFrontend::buildFeatsAndRun (*constants, scratch, winBuf,
@@ -572,6 +602,9 @@ void MossFormerShortDenoise::assembleOutput (juce::AudioBuffer<float>& buffer, i
     for (int i = 0; i < n; ++i)
     {
         const std::int64_t pos = served + i;
+        const std::int64_t timelineReadPos = pos - bStart;
+        if (timelineReadPos >= 0 && hqReadPos < timelineReadPos)
+            hqReadPos = timelineReadPos; // discard HQ samples that missed their output time
         const bool bAvail = pos >= bStart
                             && juce::jmin (hqWritePos[0], hqWritePos[1]) - hqReadPos > 0;
         if (bAvail && ! hqEngaged)
@@ -621,7 +654,7 @@ void MossFormerShortDenoise::assembleOutput (juce::AudioBuffer<float>& buffer, i
             if (haveB)
                 out = useA ? (1.0f - gNew) * a + gNew * b[ch] : b[ch];
             else
-                out = useA ? (1.0f - gNew) * a : 0.0f;
+                out = useA ? a : 0.0f;
             buffer.getWritePointer (ch)[i] = out;
         }
 
