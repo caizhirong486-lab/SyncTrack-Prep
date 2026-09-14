@@ -78,7 +78,7 @@ HqRuntimeState SyncTrackPrepProcessor::getHqRuntimeState() const
     if (mode != DenoiseMode::hq)
         return HqRuntimeState::inactive;
     if (isNonRealtime() && getHqRenderTarget() == HqRenderTarget::dop4s)
-        return HqRuntimeState::dop4sOffline;
+        return mossStage.runtimeState();
     return mossShort.runtimeState();
 }
 
@@ -243,6 +243,7 @@ juce::File SyncTrackPrepProcessor::findBundleResourceDir (const juce::String& su
         exeDir.getParentDirectory().getChildFile ("Resources").getChildFile (sub),
         exeDir.getParentDirectory().getParentDirectory().getChildFile ("Resources").getChildFile (sub),
         juce::File::getCurrentWorkingDirectory().getChildFile (sub),
+        juce::File::getCurrentWorkingDirectory().getChildFile ("third_party").getChildFile (sub),
     };
     for (const auto& c : candidates)
         if (c.exists())
@@ -279,6 +280,11 @@ void SyncTrackPrepProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     const auto mossRes = findBundleResourceDir ("mossformer2");
     const auto mossModel = mossRes.getChildFile ("mossformer2_dynamic.onnx");
     mossStage.setModelPath (mossModel);
+    mossStage.setMelPath (mossRes.getChildFile ("mel60_2048.f32"));
+    mossStage.setDopDitherPath (mossRes.getChildFile ("dop_dither.f32"));
+    mossStage.attachDfn3 (&dfn3Stage);
+    mossStage.setSyncWait (isNonRealtime()
+                           && getHqRenderTarget() == HqRenderTarget::dop4s);
     mossStage.prepare (sampleRate, samplesPerBlock, numCh);
 
     mossShort.setMelPath (mossRes.getChildFile ("mel60_2048.f32"));
@@ -386,6 +392,8 @@ void SyncTrackPrepProcessor::setNonRealtime (bool shouldBeNonRealtime) noexcept
         // serving the aligned DFN3 chain; latency returns to the 250 ms
         // contract immediately (defensive publish, no mode-based guessing).
         mossShort.setSynchronous (false);
+        if (dspPrepared.load (std::memory_order_relaxed))
+            mossShort.bumpGeneration (lastStreamTime >= 0 ? lastStreamTime : 0);
         lastStreamTime = -1;
     }
 
@@ -575,26 +583,62 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     if (modeNow == (int) DenoiseMode::hq)
     {
         const std::uint64_t self = (std::uint64_t) (std::uintptr_t) this;
-        if (leaseId == 0)
+        if (isNonRealtime())
         {
-            // acquire only when actually playing HQ in realtime
-            if (playingNow && ! isNonRealtime()
-                && HqInstanceLease::tryAcquire (self))
-                leaseId = self;
-            else if (HqInstanceLease::owner() != self)
-                mossShort.setCapacityFallback (true);
-        }
-        if (leaseId == self && (isNonRealtime() || (! playingNow && false)))
-            {} // keep the lease through stop/seek/Mixdown/DOP (plan rule)
-        if (leaseId == self && modeNow == (int) DenoiseMode::hq
-            && HqInstanceLease::owner() == self)
+            // The token limits realtime CPU only. Scanners, stopped instances
+            // and offline Short/Mixdown renders neither acquire it nor inherit
+            // a realtime capacity rejection.
+            if (leaseId == self)
+            {
+                HqInstanceLease::tryRelease (leaseId);
+                leaseId = 0;
+            }
             mossShort.setCapacityFallback (false);
+            realtimeHqWasPlaying = false;
+        }
+        else
+        {
+            const bool playbackStarted = playingNow && ! realtimeHqWasPlaying;
+            if (playbackStarted)
+                leaseRejectedForPlayback = false;
+
+            if (! playingNow && realtimeHqWasPlaying && leaseId == self)
+            {
+                HqInstanceLease::tryRelease (leaseId);
+                leaseId = 0;
+            }
+
+            if (playingNow && leaseId == 0 && ! leaseRejectedForPlayback)
+            {
+                if (HqInstanceLease::tryAcquire (self))
+                    leaseId = self;
+                else
+                    leaseRejectedForPlayback = true;
+            }
+
+            if (leaseId == self && HqInstanceLease::owner() == self)
+                mossShort.setCapacityFallback (false);
+            else if (leaseRejectedForPlayback)
+                mossShort.setCapacityFallback (true);
+
+            // A rejected instance does not retry while this playback remains
+            // continuous. Stop/start creates the next acquisition boundary.
+            realtimeHqWasPlaying = playingNow;
+        }
     }
     else if (leaseId != 0)
     {
         HqInstanceLease::tryRelease (leaseId);
         leaseId = 0;
         mossShort.setCapacityFallback (false);
+        realtimeHqWasPlaying = false;
+        leaseRejectedForPlayback = false;
+    }
+    else
+    {
+        mossShort.setCapacityFallback (false);
+        realtimeHqWasPlaying = false;
+        leaseRejectedForPlayback = false;
     }
 
     const int winNow = activeStage == &mossStage ? mossStage.debugWindowsRun() : -1;
@@ -637,8 +681,8 @@ void SyncTrackPrepProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     channelRepair.process (buffer);
     leveler.process (buffer);
 
-    // Denoise stage: short equal-power crossfade between the outgoing and the
-    // incoming engine when the mode changes.
+    // Denoise stage: short complementary raised-cosine crossfade between the
+    // outgoing and incoming engines when the mode changes.
     if (prevStage != nullptr)
     {
         // Match the host's actual block length: feeding the outgoing engine a

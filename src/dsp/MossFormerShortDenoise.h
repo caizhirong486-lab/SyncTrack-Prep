@@ -32,7 +32,7 @@ class Dfn3Denoise;
  *
  * The DFN3 alignment chain (realtime) is padded to the HQ 250 ms contract so
  * priming, seeks and deadline-miss degradation swap engines through the 15 ms
- * equal-power crossfade without changing the reported latency.
+ * complementary raised-cosine crossfade without changing reported latency.
  */
 class MossFormerShortDenoise : public DenoiseStage
 {
@@ -65,13 +65,14 @@ public:
 
     /** Set once the single-instance lease is lost: permanently serve the
         aligned DFN3 chain without starting the worker pipeline. */
-    void setCapacityFallback (bool on) { capacityFallback.store (on, std::memory_order_relaxed); }
+    void setCapacityFallback (bool on);
 
     /** Test hook: count the next steady-state window as a deadline miss. */
     void forceDeadlineMiss() { forceMiss.store (true, std::memory_order_relaxed); }
 
     /** Test hooks (diagnostics only). */
     int deadlineMissesForTest() const { return deadlineMisses.load(); }
+    int windowsStartedForTest() const { return windowsStarted.load(); }
     HqRuntimeState debugStateForTest() const { return state.load(); }
     std::int64_t debugRingBacklog() const
     {
@@ -84,7 +85,7 @@ public:
     static constexpr int framesPerWin = (win48 - MossFormerFrontend::kWinLen)
                                          / MossFormerFrontend::kHop + 1; // 16
     static constexpr int contract48 = 12000; // 250 ms at 48 kHz
-    static constexpr int fade48 = 720;       // 15 ms equal-power crossfade (48k)
+    static constexpr int fade48 = 720;       // 15 ms raised-cosine crossfade (48k)
 
 private:
     /** Classic SPSC ring: the writer owns `w`, the reader owns `r`. */
@@ -100,8 +101,8 @@ private:
 
     // worker side
     void workerLoop();
-    bool runWindow (int winK, std::uint64_t frameBase, std::int64_t epochStartW,
-                    int pad0, std::int64_t& readCursor);
+    bool runWindow (int winK, std::uint64_t frameBase, std::uint64_t expectedEpoch,
+                    std::int64_t epochStartW, int pad0, std::int64_t& readCursor);
     // offline inline path
 
     juce::File modelFile, melFile;
@@ -119,13 +120,13 @@ private:
     std::atomic<bool> synchronous { false };
     std::atomic<bool> capacityFallback { false };
     std::atomic<bool> forceMiss { false };
-    std::atomic<int> generation { 0 };
     std::atomic<std::uint64_t> streamEpoch { 0 };
     std::atomic<std::int64_t> alignBase48 { 0 };
     std::atomic<int64_t> pad0Samples { 0 };
     std::atomic<float> amount01 { 0.45f };
     std::atomic<HqRuntimeState> state { HqRuntimeState::inactive };
     std::atomic<int> deadlineMisses { 0 };
+    std::atomic<int> windowsStarted { 0 };
 
     // audio-thread world
     std::vector<float> inputCopy, dfnAligned; // dfnAligned: numCh * maxBlock
@@ -143,6 +144,7 @@ private:
     std::int64_t served = 0;
     std::int64_t syncWinK = 0;
     std::array<Ring, 2> hqOut48;              // worker -> audio (48k domain)
+    std::array<std::atomic<std::uint64_t>, 2> hqOutEpoch; // generation of published samples
     std::array<std::vector<float>, 2> syncIn; // offline input accumulation (48k)
     std::int64_t syncWritten = 0;
     std::array<std::int64_t, 2> syncWrittenCh { 0, 0 };

@@ -7,20 +7,31 @@
 
 MossFormerMaskNet& MossFormerMaskNet::instance()
 {
-    static MossFormerMaskNet inst;
-    return inst;
+    // ORT objects deliberately live for the process lifetime. Destruction of
+    // a Session after ORT's own registries have started tearing down is not a
+    // supported ordering and used to make short-lived validator/test hosts
+    // crash after all assertions had passed. Engine destructors still join
+    // the loader via finishLoad(), so no code is running when a module unloads.
+    static auto* inst = new MossFormerMaskNet;
+    return *inst;
 }
 
 MossFormerMaskNet::~MossFormerMaskNet()
 {
+    finishLoad();
+}
+
+void MossFormerMaskNet::finishLoad()
+{
+    const std::lock_guard<std::mutex> lock (loaderMutex);
     if (loader.joinable())
         loader.join();
 }
 
 void MossFormerMaskNet::resetForTests()
 {
-    if (loader.joinable())
-        loader.join();
+    finishLoad();
+    const std::lock_guard<std::mutex> lock (loaderMutex);
     loaderStarted = false;
     session.reset();
     loadState_.store (LoadState::idle, std::memory_order_release);
@@ -63,6 +74,7 @@ void MossFormerMaskNet::requestLoad (const juce::File& modelFile)
     // on the calling thread — the host's main thread. The 1.22 universal2
     // dylib crashes when its telemetry races from a background thread.
     sharedEnv();
+    const std::lock_guard<std::mutex> lock (loaderMutex);
     if (loadState_.load (std::memory_order_acquire) == LoadState::failed)
         return;
     if (loaderStarted)

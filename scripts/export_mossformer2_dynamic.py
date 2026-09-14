@@ -167,17 +167,22 @@ def main() -> int:
 
         # CPU benchmark: the realtime steady-state job shape.
         x16 = torch.randn(2, SHORT_FRAMES, 180).numpy()
-        for _ in range(3):
+        for _ in range(5):
             sess.run(["mask"], {"feats": x16})
         times = []
-        for _ in range(10):
+        for _ in range(100):
             t0 = time.perf_counter()
             sess.run(["mask"], {"feats": x16})
             times.append((time.perf_counter() - t0) * 1000.0)
-        times.sort()
-        report["ort_latency_ms_frames16_batch2"] = times[len(times) // 2]
-        print(f"ORT frames16 batch2 median: {times[len(times)//2]:.1f} ms "
-              f"(min {times[0]:.1f}, max {times[-1]:.1f})")
+        p50, p95, p99 = (float(x) for x in np.percentile(times, [50, 95, 99]))
+        report["ort_latency_ms_frames16_batch2"] = p50
+        report["ort_latency_ms_frames16_batch2_p95"] = p95
+        report["ort_latency_ms_frames16_batch2_p99"] = p99
+        report["ort_latency_ms_frames16_batch2_max"] = max(times)
+        report["ort_latency_samples"] = len(times)
+        print(f"ORT frames16 batch2: p50 {p50:.1f} ms, p95 {p95:.1f} ms, "
+              f"p99 {p99:.1f} ms, max {max(times):.1f} ms")
+        assert p99 < 100.0, f"realtime inference p99 {p99:.1f} ms >= 100 ms"
         (out_path.parent / "dynamic_export_report.txt").write_text(
             repr(report) + "\n", encoding="utf-8")
 

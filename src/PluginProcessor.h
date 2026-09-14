@@ -118,7 +118,7 @@ private:
     DenoiseStage* activeStage = nullptr;
     DenoiseStage* prevStage = nullptr;   // outgoing engine during a crossfade
     juce::AudioBuffer<float> fadeTmp;
-    int fadeLen = 720;                   // 15 ms equal-power crossfade
+    int fadeLen = 720;                   // 15 ms raised-cosine crossfade
     int fadePos = 0;
 
     std::atomic<float>* pPreset = nullptr;
@@ -140,6 +140,8 @@ private:
     std::atomic<bool> dspPrepared { false };
     std::int64_t lastStreamTime = -1;
     std::uint64_t leaseId = 0;
+    bool realtimeHqWasPlaying = false;
+    bool leaseRejectedForPlayback = false;
     std::atomic<int> pendingLatency { -1 };
     std::atomic<float> inputPeak { 0.0f };
     std::atomic<float> outputPeak { 0.0f };

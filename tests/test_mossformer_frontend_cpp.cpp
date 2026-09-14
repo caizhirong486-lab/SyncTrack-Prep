@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "dsp/MossFormerFrontend.h"
+#include "TestRequireNN.h"
 
 #include <cmath>
 #include <cstdio>
@@ -57,10 +58,8 @@ std::unique_ptr<Golden> loadGolden()
 TEST_CASE ("C++ ClearerVoice frontend/backend matches the Python reference", "[moss][frontend]")
 {
     auto g = loadGolden();
-    if (g == nullptr)
-    {
-        SKIP ("golden vectors missing (run scripts/export_mossformer2_dynamic.py)");
-    }
+    stpRequireNnOrSkip (g != nullptr,
+                        "golden vectors missing (run scripts/export_mossformer2_dynamic.py)");
 
     juce::String err;
     const auto melGold = goldenDir().getChildFile ("mel60_2048.f32");

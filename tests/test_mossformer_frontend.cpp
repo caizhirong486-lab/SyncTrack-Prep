@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include "dsp/MossFormerDenoise.h"
+#include "TestRequireNN.h"
 #include <cmath>
 #include <random>
 
@@ -21,10 +22,8 @@ TEST_CASE ("MossFormer stitching: chunk boundaries stay continuous and latency i
 {
 #ifdef STP_ENABLE_MOSSFORMER
     const auto model = mossModelFromEnv();
-    if (! model.existsAsFile())
-    {
-        SKIP ("MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
-    }
+    stpRequireNnOrSkip (model.existsAsFile(),
+                        "MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
     MossFormerDenoise den;
     den.setModelPath (model);
     den.setMelPath (juce::File::getCurrentWorkingDirectory()
@@ -100,10 +99,8 @@ TEST_CASE ("MossFormer waveform contract matches the official int16-domain decod
 {
 #ifdef STP_ENABLE_MOSSFORMER
     const auto model = mossModelFromEnv();
-    if (! model.existsAsFile())
-    {
-        SKIP ("MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
-    }
+    stpRequireNnOrSkip (model.existsAsFile(),
+                        "MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
 
     constexpr int sr = 48000;
     constexpr int n = sr * 8;

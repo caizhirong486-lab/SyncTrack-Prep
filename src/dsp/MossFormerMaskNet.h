@@ -51,6 +51,9 @@ public:
     }
     /** Blocks up to timeoutMs (offline render start only). */
     bool waitReady (int timeoutMs);
+    /** Waits for the one-shot loader to finish. Engine teardown calls this
+        before the plug-in module can unload ONNX Runtime. */
+    void finishLoad();
     void resetForTests();
 
     /** [batch, frames, 180] -> [batch, frames, 961] (frame-major rows).
@@ -66,6 +69,7 @@ private:
     mutable std::mutex errorMutex;
     juce::String errorMessage;
     std::thread loader;
+    std::mutex loaderMutex;
     bool loaderStarted = false;
 
     struct Session;

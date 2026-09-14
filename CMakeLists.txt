@@ -109,6 +109,7 @@ if(STP_REQUIRE_NN)
     endif()
     foreach(f third_party/dfn/model/DeepFilterNet3_onnx.tar.gz
               third_party/mossformer2/mossformer2_dynamic.onnx
+              third_party/mossformer2/mossformer2_fp32.onnx
               third_party/mossformer2/mel60_2048.f32
               third_party/mossformer2/dop_dither.f32)
         if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${f}")
@@ -144,6 +145,9 @@ juce_add_plugin(SyncTrackPrep
 juce_generate_juce_header(SyncTrackPrep)
 
 function(stp_link_nn_engines TARGET IS_BUNDLE)
+    if(STP_REQUIRE_NN)
+        target_compile_definitions(${TARGET} PRIVATE STP_REQUIRE_NN=1)
+    endif()
     if(STP_HAVE_DFN3)
         target_link_libraries(${TARGET} PRIVATE stp_libdf)
         target_include_directories(${TARGET} PRIVATE
@@ -396,5 +400,8 @@ if(STP_BUILD_TESTS)
 
     stp_link_nn_engines(SyncTrackPrepStateTests ON)
 
-    catch_discover_tests(SyncTrackPrepStateTests PROPERTIES SKIP_RETURN_CODE 4)
+    catch_discover_tests(SyncTrackPrepStateTests
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        PROPERTIES SKIP_RETURN_CODE 4
+    )
 endif()

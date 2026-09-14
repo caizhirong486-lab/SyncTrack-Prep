@@ -5,12 +5,15 @@
 
 #include "dsp/Dfn3Denoise.h"
 #include "dsp/MossFormerShortDenoise.h"
+#include "TestRequireNN.h"
 
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <random>
 #include <cstdio>
+#include <chrono>
+#include <thread>
 
 #ifdef STP_ENABLE_MOSSFORMER
 
@@ -76,8 +79,8 @@ juce::AudioBuffer<float> render (MossFormerShortDenoise& e, const juce::AudioBuf
 TEST_CASE ("Short window: latency contract at the fixed 250 ms", "[moss][short]")
 {
     auto model = modelFile();
-    if (! model.existsAsFile() || ! melFile().existsAsFile())
-        SKIP ("dynamic model / mel bank not present");
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile(),
+                        "dynamic model / mel bank not present");
 
     MossFormerShortDenoise e;
     e.setMelPath (melFile());
@@ -98,11 +101,47 @@ TEST_CASE ("Short window: latency contract at the fixed 250 ms", "[moss][short]"
                  }()));
 }
 
+TEST_CASE ("Short window: generation bump discards an in-flight old window", "[moss][short][generation]")
+{
+    auto model = modelFile();
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile(),
+                        "dynamic model / mel bank not present");
+
+    MossFormerShortDenoise e;
+    e.setMelPath (melFile());
+    e.setModelPath (model);
+    e.prepare (48000.0, 512, 2);
+    stpRequireNnOrSkip (MossFormerMaskNet::instance().waitReady (30000),
+                        "MaskNet failed to load");
+
+    const auto input = makeSignal (MossFormerShortDenoise::win48);
+    juce::AudioBuffer<float> slice (2, 512);
+    for (int off = 0; off < input.getNumSamples(); off += 512)
+    {
+        const int n = juce::jmin (512, input.getNumSamples() - off);
+        slice.setSize (2, n, false, false, true);
+        for (int ch = 0; ch < 2; ++ch)
+            slice.copyFrom (ch, 0, input, ch, off, n);
+        e.process (slice);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds (2);
+    while (e.windowsStartedForTest() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    REQUIRE (e.windowsStartedForTest() > 0);
+
+    // The worker is inside frontend/inference. A seek invalidates that window;
+    // it must not publish behind the audio thread's queue flush.
+    e.bumpGeneration (48000);
+    std::this_thread::sleep_for (std::chrono::milliseconds (250));
+    REQUIRE (e.debugRingBacklog() == 0);
+}
+
 TEST_CASE ("Short window: block-size invariance (synchronous offline)", "[moss][short]")
 {
     auto model = modelFile();
-    if (! model.existsAsFile() || ! melFile().existsAsFile())
-        SKIP ("dynamic model / mel bank not present");
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile(),
+                        "dynamic model / mel bank not present");
 
     const int n = 48000; // 1 s
     const auto in = makeSignal (n);
@@ -116,10 +155,12 @@ TEST_CASE ("Short window: block-size invariance (synchronous offline)", "[moss][
         e.setSynchronous (true);
         e.setAmount (1.0f);
         e.prepare (48000.0, block, 2);
-        if (block == 64 && ! MossFormerMaskNet::instance().waitReady (30000))
-            SKIP (("MaskNet failed: " + MossFormerMaskNet::instance().error()
-                   + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
-                      .toRawUTF8());
+        if (block == 64)
+            stpRequireNnOrSkip (
+                MossFormerMaskNet::instance().waitReady (30000),
+                ("MaskNet failed: " + MossFormerMaskNet::instance().error()
+                 + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
+                    .toRawUTF8());
         auto out = render (e, in, block, false);
 
         if (reference.getNumSamples() == 0)
@@ -141,8 +182,9 @@ TEST_CASE ("Short window: block-size invariance (synchronous offline)", "[moss][
 TEST_CASE ("Short window: Amount 0% is the delay-compensated dry signal", "[moss][short]")
 {
     auto model = modelFile();
-    if (! model.existsAsFile() || ! melFile().existsAsFile() || ! dfn3File().existsAsFile())
-        SKIP ("models not present");
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile()
+                            && dfn3File().existsAsFile(),
+                        "models not present");
     Dfn3Denoise dfn3;
     dfn3.setModelPath (dfn3File());
     dfn3.prepare (48000.0, 512, 2);
@@ -159,10 +201,11 @@ TEST_CASE ("Short window: Amount 0% is the delay-compensated dry signal", "[moss
     e.setSynchronous (true);
     e.setAmount (0.0f);
     e.prepare (48000.0, 512, 2);
-    if (! MossFormerMaskNet::instance().waitReady (30000))
-        SKIP (("MaskNet failed: " + MossFormerMaskNet::instance().error()
-               + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
-                  .toRawUTF8());
+    stpRequireNnOrSkip (
+        MossFormerMaskNet::instance().waitReady (30000),
+        ("MaskNet failed: " + MossFormerMaskNet::instance().error()
+         + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
+            .toRawUTF8());
     auto out = render (e, in, 512, false);
 
     const int lat = e.getLatencySamples();
@@ -229,47 +272,60 @@ TEST_CASE ("Short window: Amount 0% is the delay-compensated dry signal", "[moss
 TEST_CASE ("Short window: forced deadline miss degrades to the aligned chain for one generation", "[moss][short]")
 {
     auto model = modelFile();
-    if (! model.existsAsFile() || ! melFile().existsAsFile())
-        SKIP ("dynamic model / mel bank not present");
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile()
+                            && dfn3File().existsAsFile(),
+                        "dynamic model / mel bank / DFN3 not present");
 
+    Dfn3Denoise dfn3;
+    dfn3.setModelPath (dfn3File());
+    dfn3.prepare (48000.0, 512, 2);
+    dfn3.setAmount (1.0f);
     MossFormerShortDenoise e;
     e.setMelPath (melFile());
     e.setModelPath (model);
+    e.attachDfn3 (&dfn3);
     e.prepare (48000.0, 512, 2); // realtime: worker thread engaged (starts loader)
     e.setAmount (1.0f);
-    if (! MossFormerMaskNet::instance().waitReady (30000))
-        SKIP (("MaskNet failed: " + MossFormerMaskNet::instance().error()
-               + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
-                  .toRawUTF8());
+    stpRequireNnOrSkip (
+        MossFormerMaskNet::instance().waitReady (30000),
+        ("MaskNet failed: " + MossFormerMaskNet::instance().error()
+         + " state=" + juce::String ((int) MossFormerMaskNet::instance().loadState()))
+            .toRawUTF8());
 
     const int n = 48000 * 2;
     const auto in = makeSignal (n);
     juce::AudioBuffer<float> slice (2, 512);
 
-    // push enough input for the steady state, then force the miss
-    for (int off = 0; off < n && e.runtimeState() != HqRuntimeState::shortActive; off += 512)
+    // Pace the harness like a 48 kHz host so the worker can establish steady
+    // state. Wait until window 1 has entered inference; the forced miss is
+    // then consumed at the next steady-state window (k >= 2).
+    int off = 0;
+    for (; off < n / 2
+           && (e.runtimeState() != HqRuntimeState::shortActive
+               || e.windowsStartedForTest() < 2);
+         off += 512)
     {
         for (int ch = 0; ch < 2; ++ch)
             slice.copyFrom (ch, 0, in, ch, off, 512);
         e.process (slice);
-        if (off > 48000)
-            break; // engine never engaged (slow machine): nothing to degrade
+        std::this_thread::sleep_for (std::chrono::milliseconds (11));
     }
-    if (e.runtimeState() != HqRuntimeState::shortActive)
-        SKIP (("no steady state in single-threaded harness: state="
-               + juce::String ((int) e.runtimeState())
-               + " misses=" + juce::String (e.deadlineMissesForTest())
-               + " (realtime degradation is verified on-device in Nuendo)"
-               ).toRawUTF8());
+    stpRequireNnOrSkip (
+        e.runtimeState() == HqRuntimeState::shortActive && e.windowsStartedForTest() >= 2,
+        ("no steady state in single-threaded harness: state="
+         + juce::String ((int) e.runtimeState())
+         + " misses=" + juce::String (e.deadlineMissesForTest()))
+            .toRawUTF8());
 
     e.forceDeadlineMiss();
     bool sawDeadlineFallback = false;
     bool outputStayedAlive = true;
-    for (int off = 48000; off < n; off += 512)
+    for (; off < n; off += 512)
     {
         for (int ch = 0; ch < 2; ++ch)
             slice.copyFrom (ch, 0, in, ch, off, 512);
         e.process (slice);
+        std::this_thread::sleep_for (std::chrono::milliseconds (11));
         if (e.runtimeState() == HqRuntimeState::fallbackDeadline)
             sawDeadlineFallback = true;
         if (slice.getMagnitude (0, 0, 512) == 0.0f)
@@ -277,13 +333,17 @@ TEST_CASE ("Short window: forced deadline miss degrades to the aligned chain for
     }
     REQUIRE (sawDeadlineFallback);
     REQUIRE (outputStayedAlive); // no silence, no dead air
+
+    e.bumpGeneration (n);
+    REQUIRE (e.runtimeState() != HqRuntimeState::fallbackDeadline);
 }
 
 TEST_CASE ("Short window: capacity fallback serves the aligned chain permanently", "[moss][short]")
 {
     auto model = modelFile();
-    if (! model.existsAsFile() || ! melFile().existsAsFile() || ! dfn3File().existsAsFile())
-        SKIP ("models not present");
+    stpRequireNnOrSkip (model.existsAsFile() && melFile().existsAsFile()
+                            && dfn3File().existsAsFile(),
+                        "models not present");
 
     Dfn3Denoise dfn3;
     dfn3.setModelPath (dfn3File());

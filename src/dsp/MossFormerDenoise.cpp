@@ -9,7 +9,10 @@
 
 #ifdef STP_ENABLE_MOSSFORMER
 
-MossFormerDenoise::~MossFormerDenoise() = default;
+MossFormerDenoise::~MossFormerDenoise()
+{
+    MossFormerMaskNet::instance().finishLoad();
+}
 MossFormerDenoise::MossFormerDenoise() = default;
 
 void MossFormerDenoise::prepare (double sampleRate, int maxBlock, int numChannels)

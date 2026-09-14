@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "dsp/MossFormerDenoise.h"
+#include "TestRequireNN.h"
 
 #include <cmath>
 #include <cstring>
@@ -52,8 +53,8 @@ juce::AudioBuffer<float> makeSignal (int n)
 TEST_CASE ("4s DOP window matches the retired fixed-graph gold", "[moss][dop]")
 {
 #ifdef STP_ENABLE_MOSSFORMER
-    if (! modelFile().existsAsFile() || ! legacyGoldFile().existsAsFile())
-        SKIP ("dynamic / gold model not present");
+    stpRequireNnOrSkip (modelFile().existsAsFile() && legacyGoldFile().existsAsFile(),
+                        "dynamic / gold model not present");
 
     const int n = MossFormerDenoise::window48; // exactly one window
     const auto in = makeSignal (n);
@@ -92,8 +93,8 @@ TEST_CASE ("4s DOP window matches the retired fixed-graph gold", "[moss][dop]")
     e.setSyncWait (true);
     e.setAmount (1.0f);
     e.prepare (48000.0, 512, 2);
-    if (! MossFormerMaskNet::instance().waitReady (30000))
-        SKIP ("MaskNet session failed to load");
+    stpRequireNnOrSkip (MossFormerMaskNet::instance().waitReady (30000),
+                        "MaskNet session failed to load");
     REQUIRE (e.isLoaded());
 
     // Render 4 s of input (window 0 completes on the last block), then flush

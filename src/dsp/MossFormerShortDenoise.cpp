@@ -15,7 +15,7 @@ namespace
 constexpr int kHop = MossFormerFrontend::kHop;
 constexpr int kMissSlack48 = 2400; // 50 ms of tolerated window-completion lag
 
-float fadeGainOld (float t) // equal-power curve: 1 = outgoing, 0 = incoming
+float fadeGainOld (float t) // raised-cosine weight: 1 = outgoing, 0 = incoming
 {
     return 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
 }
@@ -45,6 +45,7 @@ MossFormerShortDenoise::~MossFormerShortDenoise()
     workerCv.notify_all();
     if (worker.joinable())
         worker.join();
+    MossFormerMaskNet::instance().finishLoad();
 }
 
 void MossFormerShortDenoise::prepare (double sampleRate, int maxBlock, int numChannels)
@@ -71,8 +72,12 @@ void MossFormerShortDenoise::prepare (double sampleRate, int maxBlock, int numCh
     const std::size_t ringCap = (std::size_t) juce::jmax (win48 * 4, block48 * 16);
     for (auto& r : in48)
         r.init (ringCap);
-    for (auto& r : hqOut48)
-        r.init (ringCap);
+    for (std::size_t ch = 0; ch < hqOut48.size(); ++ch)
+    {
+        hqOut48[ch].init (ringCap);
+        hqOutEpoch[ch].store (streamEpoch.load (std::memory_order_relaxed),
+                              std::memory_order_relaxed);
+    }
 
     inputCopy.assign ((std::size_t) numCh * (std::size_t) maxBlockSession, 0.0f);
     dfnAligned.assign ((std::size_t) numCh * (std::size_t) maxBlockSession, 0.0f);
@@ -129,6 +134,7 @@ void MossFormerShortDenoise::reset()
     hqWritePos = { 0, 0 };
     hqReadPos = 0;
     deadlineMisses.store (0, std::memory_order_relaxed);
+    windowsStarted.store (0, std::memory_order_relaxed);
     std::fill (dfnDelay.begin(), dfnDelay.end(), 0.0f);
     dfnDelayPos = 0;
     std::fill (hqSession.begin(), hqSession.end(), 0.0f);
@@ -151,12 +157,20 @@ void MossFormerShortDenoise::reset()
 
 void MossFormerShortDenoise::bumpGeneration (std::int64_t sessionStart)
 {
-    generation.fetch_add (1, std::memory_order_release);
     const std::int64_t start48 = (std::int64_t) std::llround (
         (double) sessionStart * (engineRate / sessionRate));
     alignBase48.store ((start48 / kHop) * kHop, std::memory_order_relaxed);
     pad0Samples.store (start48 - (start48 / kHop) * kHop, std::memory_order_relaxed);
     streamEpoch.fetch_add (1, std::memory_order_release);
+    if (! capacityFallback.load (std::memory_order_relaxed)
+        && state.load (std::memory_order_relaxed) != HqRuntimeState::fallbackModelError)
+    {
+        state.store (MossFormerMaskNet::instance().loadState()
+                             == MossFormerMaskNet::LoadState::ready
+                         ? HqRuntimeState::warming
+                         : HqRuntimeState::loading,
+                     std::memory_order_relaxed);
+    }
     served = 0;
     fadePos = 0;
     fadeOutPos = -1;
@@ -185,6 +199,26 @@ void MossFormerShortDenoise::setAmount (float amount01In)
         dfn3->setAmount (amount01In);
 }
 
+void MossFormerShortDenoise::setCapacityFallback (bool on)
+{
+    const bool wasOn = capacityFallback.exchange (on, std::memory_order_relaxed);
+    if (on)
+    {
+        state.store (HqRuntimeState::fallbackCapacity, std::memory_order_relaxed);
+        return;
+    }
+    if (! wasOn)
+        return;
+
+    const auto load = MossFormerMaskNet::instance().loadState();
+    state.store (constants == nullptr || load == MossFormerMaskNet::LoadState::failed
+                     ? HqRuntimeState::fallbackModelError
+                     : load == MossFormerMaskNet::LoadState::ready
+                           ? HqRuntimeState::warming
+                           : HqRuntimeState::loading,
+                 std::memory_order_relaxed);
+}
+
 HqRuntimeState MossFormerShortDenoise::runtimeState() const
 {
     if (capacityFallback.load (std::memory_order_relaxed))
@@ -197,6 +231,7 @@ HqRuntimeState MossFormerShortDenoise::runtimeState() const
 // ---------------------------------------------------------------------------
 
 bool MossFormerShortDenoise::runWindow (int winK, std::uint64_t frameBase,
+                                        std::uint64_t expectedEpoch,
                                         std::int64_t epochStartW, int pad0,
                                         std::int64_t& readCursor)
 {
@@ -220,6 +255,7 @@ bool MossFormerShortDenoise::runWindow (int winK, std::uint64_t frameBase,
     }
     readCursor += win48 - (winK == 0 ? pad0 : 0);
 
+    windowsStarted.fetch_add (1, std::memory_order_relaxed);
     if (! MossFormerFrontend::buildFeatsAndRun (*constants, scratch, winBuf,
                                                 framesPerWin,
                                                 frameBase + (std::uint64_t) (winK * 15),
@@ -231,13 +267,22 @@ bool MossFormerShortDenoise::runWindow (int winK, std::uint64_t frameBase,
                                    amount01.load (std::memory_order_relaxed),
                                    framesPerWin, win48, trim48,
                                    winK == 0 ? 0 : trim48);
+    // A transport discontinuity may arrive while the expensive frontend/ORT
+    // call is in flight. Do not publish that old-generation result after the
+    // audio thread has flushed its output cursor.
+    if (streamEpoch.load (std::memory_order_acquire) != expectedEpoch)
+        return true;
+
     const int emitLen = win48 - trim48 - (winK == 0 ? 0 : trim48);
     int skip = 0;
     if (winK == 0 && pad0 > 0)
         skip = pad0; // pre-generation head is never emitted
     for (int ch = 0; ch < 2; ++ch)
+    {
+        hqOutEpoch[(std::size_t) ch].store (expectedEpoch, std::memory_order_release);
         hqOut48[(std::size_t) ch].push (wetBuf[(std::size_t) ch].data() + skip,
                                         emitLen - skip);
+    }
     return true;
 }
 
@@ -289,7 +334,7 @@ void MossFormerShortDenoise::workerLoop()
 
         const std::uint64_t base = (std::uint64_t) alignBase48.load (std::memory_order_relaxed)
                                    / (std::uint64_t) kHop;
-        if (! runWindow (winK, base, epochStartW, pad0, readCursor))
+        if (! runWindow (winK, base, seenEpoch, epochStartW, pad0, readCursor))
         {
             stopThisGeneration = true;
             state.store (HqRuntimeState::fallbackModelError, std::memory_order_relaxed);
@@ -462,6 +507,12 @@ void MossFormerShortDenoise::process (juce::AudioBuffer<float>& buffer)
         for (int ch = 0; ch < numCh; ++ch)
         {
             auto& ring = hqOut48[(std::size_t) ch];
+            const auto currentEpoch = streamEpoch.load (std::memory_order_acquire);
+            if (hqOutEpoch[(std::size_t) ch].load (std::memory_order_acquire) != currentEpoch)
+            {
+                ring.r.store (ring.written(), std::memory_order_release);
+                continue;
+            }
             while (ring.written() - ring.r.load (std::memory_order_relaxed) > 0)
             {
                 const std::int64_t avail = ring.written()
@@ -478,7 +529,11 @@ void MossFormerShortDenoise::process (juce::AudioBuffer<float>& buffer)
                 appendHqSession (ch, tmp48.data(), got);
             }
         }
-        if (hqWritePos[0] > 0 && ! capacityFallback.load (std::memory_order_relaxed))
+        const auto currentState = state.load (std::memory_order_relaxed);
+        if (hqWritePos[0] > 0 && ! capacityFallback.load (std::memory_order_relaxed)
+            && (currentState == HqRuntimeState::inactive
+                || currentState == HqRuntimeState::loading
+                || currentState == HqRuntimeState::warming))
             state.store (HqRuntimeState::shortActive, std::memory_order_relaxed);
     }
 

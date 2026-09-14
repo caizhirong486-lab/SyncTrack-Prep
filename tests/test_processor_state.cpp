@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "PluginProcessor.h"
 #include "TestTruePeak.h"
+#include "TestRequireNN.h"
 
 namespace
 {
@@ -45,6 +46,29 @@ void setFloat (juce::AudioProcessorValueTreeState& apvts, const char* id, float 
     auto* p = apvts.getParameter (id);
     REQUIRE (p != nullptr);
     p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+class TestPlayHead final : public juce::AudioPlayHead
+{
+public:
+    Optional<PositionInfo> getPosition() const override { return position; }
+
+    void set (bool playing, std::int64_t sample)
+    {
+        position.setIsPlaying (playing);
+        position.setTimeInSamples (sample);
+    }
+
+private:
+    PositionInfo position;
+};
+
+void processSilence (SyncTrackPrepProcessor& p, int samples = 512)
+{
+    juce::AudioBuffer<float> block (2, samples);
+    block.clear();
+    juce::MidiBuffer midi;
+    p.processBlock (block, midi);
 }
 }
 
@@ -320,6 +344,43 @@ TEST_CASE ("Audio-Mixdown flip keeps the Short-target latency constant", "[state
     REQUIRE (hq4s > hq250);
 }
 
+TEST_CASE ("Processor 4s DOP holds input for the advertised latency", "[state][hq][dop]")
+{
+#if defined(STP_ENABLE_MOSSFORMER)
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    const auto resources = juce::File::getCurrentWorkingDirectory()
+                               .getChildFile ("third_party/mossformer2");
+    stpRequireNnOrSkip (resources.getChildFile ("mossformer2_dynamic.onnx").existsAsFile()
+                            && resources.getChildFile ("mel60_2048.f32").existsAsFile()
+                            && resources.getChildFile ("dop_dither.f32").existsAsFile(),
+                        "MossFormer DOP resources are not present");
+
+    SyncTrackPrepProcessor p;
+    p.setHqRenderTarget (SyncTrackPrepProcessor::HqRenderTarget::dop4s);
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    setFloat (p.apvts, "denoiseAmount", 100.0f);
+    p.setNonRealtime (true);
+    p.prepareToPlay (48000.0, 512);
+
+    juce::AudioBuffer<float> block (2, 512);
+    block.clear();
+    for (int ch = 0; ch < block.getNumChannels(); ++ch)
+        for (int i = 0; i < block.getNumSamples(); ++i)
+            block.setSample (ch, i, 0.05f * std::sin (
+                juce::MathConstants<float>::twoPi * 440.0f * (float) i / 48000.0f));
+
+    juce::MidiBuffer midi;
+    p.processBlock (block, midi);
+
+    INFO ("runtime state " << (int) p.getHqRuntimeState());
+    REQUIRE (block.getMagnitude (0, 0, block.getNumSamples()) <= 1.0e-8f);
+    REQUIRE (p.getHqRuntimeState() != HqRuntimeState::fallbackModelError);
+#else
+    SKIP ("Built without STP_ENABLE_MOSSFORMER");
+#endif
+}
+
 TEST_CASE ("Render target: serialised, legacy-migrated, not automatable", "[state][hq]")
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -378,6 +439,74 @@ TEST_CASE ("Single realtime HQ lease: CAS semantics and capacity fallback", "[st
     // re-acquire happens at the next generation, not mid-playback
     REQUIRE (HqInstanceLease::tryAcquire (222));
     HqInstanceLease::tryRelease (222);
+}
+
+TEST_CASE ("Offline Short render does not consume or lose the realtime HQ lease", "[state][hq][lease]")
+{
+#if defined(STP_ENABLE_MOSSFORMER)
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    REQUIRE (HqInstanceLease::owner() == 0);
+
+    SyncTrackPrepProcessor p;
+    setChoice (p.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    p.setNonRealtime (true);
+    p.prepareToPlay (48000.0, 512);
+    processSilence (p);
+
+    REQUIRE (HqInstanceLease::owner() == 0);
+    REQUIRE (p.getHqRuntimeState() != HqRuntimeState::fallbackCapacity);
+#else
+    SKIP ("Built without STP_ENABLE_MOSSFORMER");
+#endif
+}
+
+TEST_CASE ("Rejected realtime HQ instance stays degraded until the next playback", "[state][hq][lease]")
+{
+#if defined(STP_ENABLE_MOSSFORMER)
+    juce::ScopedJuceInitialiser_GUI juceInit;
+    REQUIRE (HqInstanceLease::owner() == 0);
+
+    SyncTrackPrepProcessor first, second;
+    TestPlayHead firstHead, secondHead;
+    first.setPlayHead (&firstHead);
+    second.setPlayHead (&secondHead);
+    setChoice (first.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    setChoice (second.apvts, "denoiseMode", (int) DenoiseMode::hq);
+    first.prepareToPlay (48000.0, 512);
+    second.prepareToPlay (48000.0, 512);
+
+    firstHead.set (true, 0);
+    secondHead.set (true, 0);
+    processSilence (first);
+    processSilence (second);
+    REQUIRE (HqInstanceLease::owner() != 0);
+    REQUIRE (second.getHqRuntimeState() == HqRuntimeState::fallbackCapacity);
+
+    // Free capacity while the rejected instance is still playing. It must not
+    // jump engines in the middle of this playback generation.
+    firstHead.set (false, 512);
+    processSilence (first);
+    REQUIRE (HqInstanceLease::owner() == 0);
+
+    secondHead.set (true, 512);
+    processSilence (second);
+    REQUIRE (second.getHqRuntimeState() == HqRuntimeState::fallbackCapacity);
+    REQUIRE (HqInstanceLease::owner() == 0);
+
+    // A stop/start boundary opens a new acquisition opportunity.
+    secondHead.set (false, 1024);
+    processSilence (second);
+    secondHead.set (true, 0);
+    processSilence (second);
+    REQUIRE (HqInstanceLease::owner() != 0);
+    REQUIRE (second.getHqRuntimeState() != HqRuntimeState::fallbackCapacity);
+
+    setChoice (second.apvts, "denoiseMode", (int) DenoiseMode::live);
+    processSilence (second);
+    REQUIRE (HqInstanceLease::owner() == 0);
+#else
+    SKIP ("Built without STP_ENABLE_MOSSFORMER");
+#endif
 }
 
 namespace
