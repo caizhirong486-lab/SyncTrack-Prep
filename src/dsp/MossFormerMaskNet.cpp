@@ -161,6 +161,8 @@ bool MossFormerMaskNet::run (const float* feats, int batch, int frames,
 
 #else // !STP_ENABLE_MOSSFORMER — engine unavailable: inert stubs
 
+struct MossFormerMaskNet::Session {};
+
 void MossFormerMaskNet::requestLoad (const juce::File&) {}
 bool MossFormerMaskNet::waitReady (int) { return false; }
 bool MossFormerMaskNet::run (const float*, int, int, std::vector<float>&) { return false; }
