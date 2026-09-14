@@ -676,5 +676,10 @@ void MossFormerShortDenoise::reset() {}
 void MossFormerShortDenoise::setAmount (float) {}
 void MossFormerShortDenoise::process (juce::AudioBuffer<float>&) {}
 void MossFormerShortDenoise::bumpGeneration (std::int64_t) {}
+void MossFormerShortDenoise::setCapacityFallback (bool) {}
+HqRuntimeState MossFormerShortDenoise::runtimeState() const
+{
+    return HqRuntimeState::fallbackModelError;
+}
 
 #endif

@@ -27,7 +27,7 @@ MossFormerFrontend::loadConstants (const juce::File& melFile, juce::String& erro
     juce::MemoryBlock data;
     juce::FileInputStream stream (melFile);
     const bool ok = stream.openedOk()
-                    && stream.readIntoMemoryBlock (data, (ssize_t) expectedMel) == (ssize_t) expectedMel
+                    && stream.readIntoMemoryBlock (data, (juce::int64) expectedMel) == (juce::int64) expectedMel
                     && data.getSize() == expectedMel;
     if (! ok)
     {
