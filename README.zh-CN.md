@@ -20,7 +20,7 @@
 In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain → UpwardExpander → PeakCompressor → TruePeakLimiter → Out
 ```
 
-* **DenoiseStage** 通过 **Denoise Mode** 下拉选择：**Off**（不抑制）、**Classic**（自研频谱 STFT/OLA，延迟 575）、**Live (DFN3)**（DeepFilterNet3 / libDF，实时，约 30 ms）、**HQ (MossFormer2)**（MossFormer2_SE_48K + ONNX Runtime，仅离线渲染，4 秒前瞻）。延迟按模式上报，宿主据此补偿。
+* **DenoiseStage** 通过 **Denoise Mode** 下拉选择：**Off**（不抑制）、**Classic**（自研频谱 STFT/OLA，延迟 575）、**Live (DFN3)**（DeepFilterNet3 / libDF，实时，约 30 ms）、**HQ (MossFormer2)**（MossFormer2_SE_48K + ONNX Runtime；实时/Mixdown 短窗为 250 ms 契约，显式 F7 DOP 为 4 秒契约）。延迟按 mode×target×nonRT 矩阵上报，宿主据此补偿。
 * Leveler 故意放在降噪**之前**：让选中的降噪引擎能把刚被抬起来的安静段底噪再刮掉一层。
 * Leveler 发布每个采样后的 *scene level*，压缩器和向上扩展器都按这个采样级联 —— 动态跟随的是听者实际听到的电平，而不是输入端的快照。
 * **Output 是整条链的补偿增益（makeup gain）**，位置在常开的安全级**之前**。因此 −1 dBTP 天花板在**任何**旋钮位置都成立：Output 往上推会把安静段抬到贴近天花板，任何试图越过天花板的部分都会被压缩器和限制器压回来。旋钮在 0 dB 时，整条链的行为跟没有这个旋钮一样。
@@ -37,7 +37,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 | **向上扩展器（Upward expander）** | 低电平向下扩展：把安静段的底噪"再往下推"，避免整条链把安静对白压平。阈值耦 scene level，不是输入包络。 |
 | **音色塑形（Tone shaper）** | 倾斜搁架 + 3 kHz 临场峰；单个 Tone 旋钮在 −1（更暖/更暗）与 +1（更亮/更前）之间旋转；0 处严格直通。 |
 | **真峰值天花板（True-peak ceiling）** | 允许的真峰值上限（−1 dBTP）。 |
-| **降噪模式（Denoise mode）** | 可选的降噪引擎：Off / Classic（自研频谱 STFT）/ Live（DeepFilterNet3，实时）/ HQ（MossFormer2，仅离线）。Amount 旋钮在所选引擎内部统一映射为"降噪强度"。 |
+| **降噪模式（Denoise mode）** | 可选的降噪引擎：Off / Classic（自研频谱 STFT）/ Live（DeepFilterNet3，实时）/ HQ（MossFormer2：实时与 Mixdown 为 160 ms 短窗，F7 DOP 为 4 s 窗）。Amount 旋钮在所选引擎内部统一映射为“降噪强度”。 |
 | **对白可懂度** | 音乐床下的同期人声是否听得懂。这是本项目的成功判据 —— **不是**广播 LUFS 合规。 |
 
 ---
@@ -67,7 +67,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 2. 把 `SyncTrack Prep.vst3` 放到 `C:\Program Files\Common Files\VST3\`（需要管理员权限）。
 3. 重启 DAW，重新扫描 VST3 插件。
 
-> Windows 二进制已由外部灰测用户在 Windows 上的 Nuendo 里实测过；残余局限见[已知局限](#已知局限)。
+> 已发布的 Windows 二进制曾由外部 Nuendo 灰测；HQ Lab 短窗路径仍须完成 Windows p99、块长与 10 分钟门。
 
 ---
 
@@ -76,7 +76,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 | DAW | 状态 |
 |---|---|
 | **Cubase** | ✅ 已验证 —— 实时与离线导出均稳定运行（在 macOS 上实测） |
-| **Nuendo** | ✅ 已验证 —— 实时与 HQ 离线（Direct Offline Processing）稳定（在 macOS 上实测）；HQ 不支持 **Audio Mixdown**（宿主会丢渲染头） |
+| **Nuendo** | ⚠️ 既有实时与 4 s F7 DOP 路径已在 macOS 验证；HQ Lab 的实时/Short Mixdown 已实现，仍待 Play/Stop/seek/Cycle、头尾、双实例与过载实机门。 |
 | Reaper | ⚠️ 未验证 |
 | FL Studio | ⚠️ 未验证 |
 | Studio One | ⚠️ 未验证 |
@@ -104,7 +104,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 | 控件 | 范围 | 说明 |
 |---|---|---|
 | **Preset** | Soft / Strong / Clean | 默认 **Strong**。切换预设时也带上该预设的 Denoise Mode 默认值（Soft=Off，Strong=Live，Clean=Classic）；在你下次切换预设之前，你自己改过的 mode 选择会被保留。 |
-| **Denoise Mode** | Off / Classic / Live (DFN3) / HQ (MossFormer2) | Classic = 自研频谱；Live = 实时 NN；HQ = 离线 NN（实时回放时静默降级为 Live 并显示提示）。 |
+| **Denoise Mode** | Off / Classic / Live (DFN3) / HQ (MossFormer2) | Classic = 自研频谱；Live = 实时 NN；HQ = 实时/Short Mixdown 短窗 NN，或显式选择的 4 s F7 DOP。 |
 | **Amount** | 0–100 % | 统一"降噪强度"：Classic 内部映射过减因子，Live 映射衰减上限，HQ 映射湿/干混合比。 |
 | **Tone** | −1 … +1 | 倾斜 + 3 kHz 临场；0 处比特直通。 |
 | **Output** | −inf … +24 dB | 安全级之前的补偿增益。skewed 范围，0 dB 居中；低于 −60 dB 显示 "-inf"。−1 dBTP 天花板始终成立。 |
@@ -128,7 +128,7 @@ In → ChannelRepair → Leveler → DenoiseStage → ToneShaper → OutputGain 
 
 这些提前讲清楚，能省掉一次 issue。
 
-* **HQ（MossFormer2）需要离线渲染 —— 请用 Direct Offline Processing。** 只有当宿主标明非实时才会真正运行。实时回放时该 mode 会静默降级为 **Live (DFN3)** 并显示提示。HQ 比 Live 多 ~4 秒的宿主延迟补偿；Nuendo 的 **F7 Direct Offline Processing** 能正确吸收（实测多次渲染逐字节一致）。**不要用 Audio Mixdown 导出 HQ**：Nuendo 的混音导出会把 ~4 秒延迟插件的头部填零约 3 秒、且尾部收集不全，导致掐头去尾——插件侧延迟/尾部上报已用插桩日志验证正确，这是宿主侧限制。变通办法：时间线上在素材前后各垫 ≥4 秒静音，bounce 后裁剪。
+* **HQ（MossFormer2）有两个显式渲染目标。** `Short / Mixdown`（新实例默认）在实时与 Audio Mixdown 中走 160 ms 短窗、总延迟固定 250 ms；`4 s DOP`（旧 HQ 工程迁移默认）仅在 nonRT/F7 DOP 中走历史 4 s 窗，实时播放仍恒走短窗。加载、seek、Cycle 与过载期间输出对齐 DFN3，不改变宿主延迟。历史 4 s DOP 已验证；新的 Short Mixdown 在下述 Nuendo 实机门通过前仍属待验收。
 * **Classic（自研频谱）在真实素材上的稳态降噪量可能不大。** 合成稳态噪声上明显，真实房间底噪上效果偏温和。底噪是主要问题时请选 **Live（DFN3）** 或 **HQ（MossFormer2）**。
 * **Classic 噪声估计器需要约一秒才稳定。** 它是在流中学习噪声频谱的，所以如果一段素材开头就是人声，最初几个 STFT 帧可能会把对白当成噪声学进去。大约一秒内会自行纠正。
 * **v0.1.x 的旧工程加载会发生漂移。** 新 **Output** 范围是 −inf…+24 dB（skewed，0 dB 居中）—— 旧范围 −24…+12 把 0 dB 存在归一化值 0.667，新映射是 0.5，所以旧的 Output 值读数会偏。旧工程里用 Denoise 复选框的，加载时会变成 **Live (DFN3)**。两者都是有意的升级映射，不是 bug。
@@ -148,6 +148,15 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8
 ctest --test-dir build --output-on-failure
 ```
+
+NN 验收构建先用 ClearerVoice Python 环境复现动态图、旧 DOP gold 图与资源，再开启严格门：
+
+```bash
+STP_PYTHON_BIN=/path/to/clearervoice/venv/bin/python ./scripts/fetch_models.sh
+cmake -B build -DSTP_REQUIRE_NN=ON
+```
+
+严格门会在任何 NN/模型/mel/dither 缺失时拒绝 configure，并把 NN 测试中的 skip 转成失败。
 
 在 macOS 上会产出 Universal 2（arm64 + x86_64）二进制。`COPY_PLUGIN_AFTER_BUILD` 是打开的，所以构建过程会顺手把 VST3 拷进你的用户插件目录。
 
@@ -179,7 +188,7 @@ cmake --build build -j 8 --target SyncTrackPrepOffline
 ./build/SyncTrackPrepOffline input.wav output-strong.wav strong 1
 ```
 
-参数：`<输入.wav> <输出.wav> [soft|strong|clean] [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]`，另有 `--tap denoise|final`、`--expander 0|1`、`--flush <秒>`、`--dfn3 <模型.tar.gz>`、`--moss <模型.onnx>`。
+参数：`<输入.wav> <输出.wav> [soft|strong|clean] [off|classic|live|hq] [amount 0-100|-1] [tone -1..1]`，另有 `--tap denoise|final`、`--expander 0|1`、`--flush <秒>`、`--dfn3 <模型.tar.gz>`、`--moss <模型目录>`、`--hq-render short|dop4s`（默认 `dop4s`）。
 
 `scripts/` 下有三个分析工具（Python 3；`analyze_ab.py` 和 `diagnose_stereo_noise.py` 需要 `ffmpeg` 在 `PATH` 里）：
 
@@ -196,11 +205,13 @@ python3 scripts/diagnose_stereo_noise.py --gold input.wav
 
 `analyze_ab.py` 会输出逐秒 CSV、带 pass/fail 标记的单行汇总 CSV，以及一份可读的 Markdown 报告。
 
+HQ 盲听必须分 Amount=100% 与 45% 两组，因为 HQ 的 Amount 是波形湿干比，而 DFN3 是衰减上限。Short HQ、DFN3、4 s HQ 都固定 `--tap denoise --expander 0`，并为每次运行记录 `--noise-window`、`--window`、`--proc-trim-start`、`--trim-end` 四项。macOS/Windows 实时门为推理 p99<100 ms、块长不变性与 10 分钟运行；Nuendo 另验 44.1/48 kHz Play/Stop/seek/Cycle、Short Mixdown 头尾（首样本偏差 ≤128）、DOP→实时回退、双实例与人为过载。
+
 ---
 
 ## 路线图
 
-* MossFormer2 流式化（因果化 + INT8 再试）—— 让 HQ 变成可实时档
+* 完成 HQ Lab 短窗引擎的 Nuendo/Windows 验收，再恢复正式身份
 * AAX（Pro Tools）与 AU（Logic Pro）构建
 * 在 Reaper、FL Studio、Studio One 上做验证
 * 更多 Linux 覆盖（LV2 / CLAP）
@@ -223,3 +234,12 @@ SyncTrack Prep 以 **GNU Affero 通用公共许可证 v3.0 或更高版本**（A
 * **MossFormer2_SE_48K** 权重 —— Apache-2.0。HQ 档模型，打包进 VST3 的 `Contents/Resources/mossformer2/`。
 
 VST 是 Steinberg Media Technologies GmbH 在欧洲及其他国家的注册商标。
+
+
+## HQ Lab（本分支）
+
+- 实时与 Audio Mixdown 走 160 ms 短窗，插件总延迟固定 250 ms；F7 DOP 在编辑器 HQ Render 选 `4 s DOP` 时沿用历史 4 s 窗（播放中不可切换）。
+- HQ 实时路径恒并行一条对齐 DFN3 链：加载、seek、Cycle、过载时以 15 ms 互补 raised-cosine 交叉降级，宿主可见延迟不变；nonRT 正常时不白跑 DFN3。
+- 单宿主进程内仅允许一个实时 HQ 实例；第二实例确定性使用对齐 DFN3。
+- 实验身份 `SyncTrack Prep HQ Lab`（Plugin Code `StHL`），与正式版并存；验收通过后恢复正式身份。
+- 待验收：Nuendo 实机、Amount 100%/45% 两组盲听，以及 Windows p99/块长/10 分钟灰测；通过前不 push、不发布。

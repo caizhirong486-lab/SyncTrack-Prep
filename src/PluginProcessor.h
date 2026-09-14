@@ -6,6 +6,8 @@
 #include "dsp/ClassicDenoise.h"
 #include "dsp/Dfn3Denoise.h"
 #include "dsp/MossFormerDenoise.h"
+#include "dsp/MossFormerShortDenoise.h"
+#include "dsp/HqInstanceLease.h"
 #include "dsp/Leveler.h"
 #include "dsp/PeakCompressor.h"
 #include "dsp/ToneShaper.h"
@@ -34,10 +36,12 @@ public:
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override;
-    /** The VST3 wrapper flips realtime/offline here (setupProcessing) without
-        re-preparing when rate and block size are unchanged. Publish the
-        engine's latency for the new mode synchronously so an offline HQ render
-        never starts with a stale realtime latency. */
+    /** The VST3 wrapper flips realtime/offline here (setupProcessing); Nuendo
+        also re-prepares around offline exports (verified by trace 2026-09-14),
+        so lifecycle order must never be used to guess the render kind — the
+        serialisable hqRenderTarget carries that decision. The flip still
+        publishes the latency matrix synchronously (Short/Mixdown keeps the
+        realtime value, so no re-compensation is triggered). */
     void setNonRealtime (bool shouldBeNonRealtime) noexcept override;
 
     int getNumPrograms() override { return 1; }
@@ -57,9 +61,27 @@ public:
     float getOutputPeak() const { return outputPeak.load (std::memory_order_relaxed); }
     float getGrDb() const { return grDb.load (std::memory_order_relaxed); }
 
-    /** True while the user picked HQ but the host is running realtime and the
-        engine was downgraded to Live (DFN3) — the editor shows a hint. */
-    bool isHqDegraded() const { return hqDegraded.load (std::memory_order_relaxed); }
+    /** True while HQ runs degraded (capacity/deadline/model fallback) — the
+        editor shows the specific reason. */
+    bool isHqDegraded() const;
+
+    /** Explicit HQ render target (plan: serialisable APVTS root property, not
+        a host-automatable parameter). */
+    enum class HqRenderTarget { shortMixdown = 0, dop4s = 1 };
+    HqRenderTarget getHqRenderTarget() const { return hqRenderTarget; }
+    void setHqRenderTarget (HqRenderTarget t);
+
+private:
+    HqRenderTarget readRenderTarget (const juce::ValueTree& state) const;
+
+public:
+
+    /** Aggregated HQ runtime state for the editor (short engine unless the
+        4s DOP engine is the offline stage). */
+    HqRuntimeState getHqRuntimeState() const;
+
+    /** Editor polling: transport actually running (blocks target changes). */
+    bool isTransportRunning() const { return transportPlaying.load (std::memory_order_relaxed); }
 
     /** Applies a pending latency change immediately (message thread only).
         The host normally gets it via the AsyncUpdater; headless tests have no
@@ -84,8 +106,9 @@ private:
 
     ChannelRepair channelRepair;
     ClassicDenoise classicStage;   // Off (disabled dry delay) + Classic
-    Dfn3Denoise dfn3Stage;         // Live (and realtime-degraded HQ)
-    MossFormerDenoise mossStage;   // HQ (non-realtime only)
+    Dfn3Denoise dfn3Stage;         // Live (and the HQ alignment chain)
+    MossFormerDenoise mossStage;   // HQ 4s DOP window (offline only)
+    MossFormerShortDenoise mossShort; // HQ 160ms short window (realtime + Mixdown)
     Leveler leveler;
     PeakCompressor peakCompressor;
     ToneShaper toneShaper;
@@ -95,7 +118,7 @@ private:
     DenoiseStage* activeStage = nullptr;
     DenoiseStage* prevStage = nullptr;   // outgoing engine during a crossfade
     juce::AudioBuffer<float> fadeTmp;
-    int fadeLen = 720;                   // 15 ms equal-power crossfade
+    int fadeLen = 720;                   // 15 ms raised-cosine crossfade
     int fadePos = 0;
 
     std::atomic<float>* pPreset = nullptr;
@@ -111,8 +134,14 @@ private:
         overwrite the saved denoise value. */
     bool isLoadingState = false;
 
+    HqRenderTarget hqRenderTarget = HqRenderTarget::shortMixdown;
     std::atomic<bool> hqDegraded { false };
+    std::atomic<bool> transportPlaying { false };
     std::atomic<bool> dspPrepared { false };
+    std::int64_t lastStreamTime = -1;
+    std::uint64_t leaseId = 0;
+    bool realtimeHqWasPlaying = false;
+    bool leaseRejectedForPlayback = false;
     std::atomic<int> pendingLatency { -1 };
     std::atomic<float> inputPeak { 0.0f };
     std::atomic<float> outputPeak { 0.0f };

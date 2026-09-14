@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the MossFormer2 SE 48K checkpoint and the ONNX Runtime C++ release
-# used by the HQ tier, plus quantize the exported ONNX model.
+# used by the HQ tier, then reproduce both the dynamic shipping graph and the
+# retired fixed graph used only by the DOP equivalence gate.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -euo pipefail
 
@@ -22,11 +23,19 @@ if [ ! -f "$CKPT" ]; then
         "https://huggingface.co/alibabasglab/MossFormer2_SE_48K/resolve/main/last_best_checkpoint.pt"
 fi
 
-# --- Export FP32 ONNX (needs python3.13 venv with torch; see plan Step 1b) ---
-ONNX="$ROOT/third_party/mossformer2/mossformer2_fp32.onnx"
-if [ ! -f "$ONNX" ]; then
-    python3 scripts/export_mossformer2_onnx.py \
-        --checkpoint "$CKPT" --output "$ONNX" --window 192000
+# --- Export FP32 ONNX (set STP_PYTHON_BIN to the ClearerVoice venv) ---
+STP_PYTHON_BIN="${STP_PYTHON_BIN:-python3}"
+ONNX="$ROOT/third_party/mossformer2/mossformer2_dynamic.onnx"
+LEGACY_ONNX="$ROOT/third_party/mossformer2/mossformer2_fp32.onnx"
+GOLDEN="$ROOT/tests/golden/mossformer/golden.sha256"
+if [ ! -f "$ONNX" ] || [ ! -f "$ROOT/third_party/mossformer2/mel60_2048.f32" ] \
+   || [ ! -f "$ROOT/third_party/mossformer2/dop_dither.f32" ] || [ ! -f "$GOLDEN" ]; then
+    (cd "$ROOT" && "$STP_PYTHON_BIN" scripts/export_mossformer2_dynamic.py \
+        --checkpoint "$CKPT" --output "$ONNX")
+fi
+if [ ! -f "$LEGACY_ONNX" ]; then
+    (cd "$ROOT" && "$STP_PYTHON_BIN" scripts/export_mossformer2_onnx.py \
+        --checkpoint "$CKPT" --output "$LEGACY_ONNX" --window 192000)
 fi
 
 # NOTE: the HQ tier ships the FP32 model (~278 MB). INT8 (dynamic and QDQ

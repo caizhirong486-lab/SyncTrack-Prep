@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include "dsp/MossFormerDenoise.h"
+#include "TestRequireNN.h"
 #include <cmath>
 #include <random>
 
@@ -10,11 +11,10 @@ juce::File mossModelFromEnv()
 {
     if (auto* env = std::getenv ("STP_MOSS_MODEL"))
         return juce::File (juce::String (env));
-    // The bundle ships FP32: INT8 was quantized and rejected by the quality
-    // gate (QDQ static correlation 0.66 on the reference material — see the
-    // 2026-09-06 changelog entry). Test against the shipped model.
+    // The HQ Lab bundle ships the dynamic MaskNet graph; the retired fixed
+    // FP32 graph remains only as the DOP gold reference in the engine tests.
     return juce::File::getCurrentWorkingDirectory()
-               .getChildFile ("third_party/mossformer2/mossformer2_fp32.onnx");
+               .getChildFile ("third_party/mossformer2/mossformer2_dynamic.onnx");
 }
 }
 
@@ -22,12 +22,15 @@ TEST_CASE ("MossFormer stitching: chunk boundaries stay continuous and latency i
 {
 #ifdef STP_ENABLE_MOSSFORMER
     const auto model = mossModelFromEnv();
-    if (! model.existsAsFile())
-    {
-        SKIP ("MossFormer ONNX model not present (third_party/mossformer2/mossformer2_fp32.onnx)");
-    }
+    stpRequireNnOrSkip (model.existsAsFile(),
+                        "MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
     MossFormerDenoise den;
     den.setModelPath (model);
+    den.setMelPath (juce::File::getCurrentWorkingDirectory()
+                        .getChildFile ("third_party/mossformer2/mel60_2048.f32"));
+    den.setDopDitherPath (juce::File::getCurrentWorkingDirectory()
+                              .getChildFile ("third_party/mossformer2/dop_dither.f32"));
+    den.setSyncWait (true);
     den.prepare (48000.0, 512, 2);
     REQUIRE (den.isLoaded());
     REQUIRE_FALSE (den.supportsRealtime());
@@ -96,15 +99,18 @@ TEST_CASE ("MossFormer waveform contract matches the official int16-domain decod
 {
 #ifdef STP_ENABLE_MOSSFORMER
     const auto model = mossModelFromEnv();
-    if (! model.existsAsFile())
-    {
-        SKIP ("MossFormer ONNX model not present (third_party/mossformer2/mossformer2_fp32.onnx)");
-    }
+    stpRequireNnOrSkip (model.existsAsFile(),
+                        "MossFormer dynamic ONNX model not present (third_party/mossformer2/mossformer2_dynamic.onnx)");
 
     constexpr int sr = 48000;
     constexpr int n = sr * 8;
     MossFormerDenoise den;
     den.setModelPath (model);
+    den.setMelPath (juce::File::getCurrentWorkingDirectory()
+                        .getChildFile ("third_party/mossformer2/mel60_2048.f32"));
+    den.setDopDitherPath (juce::File::getCurrentWorkingDirectory()
+                              .getChildFile ("third_party/mossformer2/dop_dither.f32"));
+    den.setSyncWait (true);
     den.prepare ((double) sr, 512, 1);
     REQUIRE (den.isLoaded());
 

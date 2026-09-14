@@ -33,7 +33,10 @@ private:
     juce::ComboBox presetBox;
     juce::Label presetLabel;
     juce::ComboBox denoiseModeBox;
+    juce::Label hqRenderLabel;
+    juce::ComboBox hqRenderBox;
     juce::Label hqHintLabel;
+    juce::Label hqStatusLabel;
     juce::ToggleButton bypassBtn { "Bypass" };
     juce::Slider outputSlider;
     juce::Slider amountSlider;
