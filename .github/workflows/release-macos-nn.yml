@@ -36,6 +36,7 @@ jobs:
           torch==2.14.0 torchaudio==2.11.0
           numpy==2.5.2 onnx==1.22.0 onnxruntime==1.29.0
           einops==0.8.2 rotary-embedding-torch==0.9.1 torchinfo==1.8.0
+          yamlargparse==1.31.1
 
       - name: Pin ClearerVoice source
         run: |
