@@ -311,6 +311,7 @@ if(STP_BUILD_TESTS)
     endif()
 
     add_executable(SyncTrackPrepTests
+        tests/test_main.cpp
         tests/test_channel_repair.cpp
         tests/test_peak_compressor.cpp
         tests/test_tone_shaper.cpp
@@ -345,7 +346,7 @@ if(STP_BUILD_TESTS)
 
     target_link_libraries(SyncTrackPrepTests
         PRIVATE
-            Catch2::Catch2WithMain
+            Catch2::Catch2
             juce::juce_dsp
             juce::juce_audio_basics
             juce::juce_audio_formats
@@ -373,6 +374,7 @@ if(STP_BUILD_TESTS)
     # Processor-level tests need the plugin shared-code target (APVTS, state,
     # JucePlugin_* definitions), which the DSP-only test binary does not link.
     add_executable(SyncTrackPrepStateTests
+        tests/test_main.cpp
         tests/test_processor_state.cpp
     )
 
@@ -383,7 +385,7 @@ if(STP_BUILD_TESTS)
 
     target_link_libraries(SyncTrackPrepStateTests
         PRIVATE
-            Catch2::Catch2WithMain
+            Catch2::Catch2
             SyncTrackPrep
             juce::juce_audio_utils
             juce::juce_dsp
