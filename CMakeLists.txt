@@ -96,7 +96,7 @@ else()
     message(STATUS "ONNX Runtime not found — HQ tier passthrough")
 endif()
 
-# Strict acceptance build: refuse to configure without the full NN stack and
+# Strict NN build: refuse to configure without the full NN stack and
 # all model resources. Ordinary model-less CI keeps the stub build.
 option(STP_REQUIRE_NN "Fail configuration unless DFN3 + MossFormer + models are present" OFF)
 if(STP_REQUIRE_NN)

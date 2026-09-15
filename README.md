@@ -67,7 +67,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 2. Move `SyncTrack Prep.vst3` into `C:\Program Files\Common Files\VST3\` (you will need administrator rights).
 3. Restart your DAW and rescan VST3 plug-ins.
 
-> The released Windows binary was verified by an external Nuendo grey-tester. The HQ Lab short-window path still needs the Windows p99/block-size/10-minute gate below.
+> Realtime HQ has not yet completed Nuendo validation on Windows.
 
 ---
 
@@ -76,7 +76,7 @@ Grab the archive for your platform from the [Releases](../../releases) page.
 | DAW | Status |
 |---|---|
 | **Cubase** | ✅ Verified — runs stably in real time and in offline bounce (tested on macOS) |
-| **Nuendo** | ⚠️ Existing realtime and 4 s F7 DOP paths are verified on macOS. The HQ Lab realtime/Short Mixdown path is implemented but still awaits the Play/Stop/seek/Cycle, head/tail, two-instance and overload checks below. |
+| **Nuendo** | ⚠️ Live (DFN3) and 4 s F7 DOP are verified on macOS. Realtime HQ and Short Mixdown still require host validation. |
 | Reaper | ⚠️ Not verified |
 | FL Studio | ⚠️ Not verified |
 | Studio One | ⚠️ Not verified |
@@ -128,7 +128,7 @@ Only stereo in / stereo out is supported.
 
 Being upfront about these will save you an issue report.
 
-* **HQ (MossFormer2) now runs in realtime and Audio Mixdown through a 160 ms short window** at a fixed 250 ms plugin latency; **F7 Direct Offline Processing** uses the historical 4 s window when the editor's **HQ Render** switch is set to `4 s DOP` (switch is locked during playback; offline CLI default is `dop4s`). HQ keeps an aligned DFN3 chain running underneath: model loading, seeks, cycle wraps and CPU overload degrade to it through a 15 ms complementary raised-cosine crossfade **without changing the reported latency**. Only one instance renders realtime HQ per host process; a second HQ instance deterministically serves the aligned DFN3 chain. This design avoids the old 4 s Mixdown contract, but the new Short Mixdown head/tail result is not accepted until the Nuendo checks below pass.
+* **HQ (MossFormer2) runs in realtime and Audio Mixdown through a 160 ms short window** at a fixed 250 ms plugin latency; **F7 Direct Offline Processing** uses the historical 4 s window when the editor's **HQ Render** switch is set to `4 s DOP` (switch is locked during playback; offline CLI default is `dop4s`). HQ keeps an aligned DFN3 chain running underneath: model loading, seeks, cycle wraps and CPU overload degrade to it through a 15 ms complementary raised-cosine crossfade **without changing the reported latency**. Only one instance renders realtime HQ per host process; a second HQ instance deterministically serves the aligned DFN3 chain. Realtime HQ and Short Mixdown remain unverified in Nuendo.
 * **HQ Render targets are explicit** because Nuendo re-prepares on every offline export: `Short / Mixdown` (default for new instances) and `4 s DOP` (migrated default for v0.2 sessions that had HQ selected).
 * **Classical spectral denoise on real material can be undramatic** when no NN tier is active. The in-house Classic denoiser is great on synth steady noise but quiet on real room tone; pick **Live** (DFN3) or **HQ** (MossFormer2) when the noise is the primary problem.
 * **The noise estimator in Classic needs about a second to settle.** It learns the noise spectrum mid-stream, so if a clip opens on speech the first few STFT frames can briefly learn dialogue instead of noise. It self-corrects in roughly one second.
@@ -150,7 +150,7 @@ cmake --build build -j 8
 ctest --test-dir build --output-on-failure
 ```
 
-For an NN acceptance build, first reproduce both MossFormer graphs and their resources with a ClearerVoice Python environment, then enable the strict gate:
+For a strict NN build, first reproduce both MossFormer graphs and their resources with a ClearerVoice Python environment, then enable the dependency gate:
 
 ```bash
 STP_PYTHON_BIN=/path/to/clearervoice/venv/bin/python ./scripts/fetch_models.sh
@@ -206,13 +206,11 @@ python3 scripts/diagnose_stereo_noise.py --gold input.wav
 
 `analyze_ab.py` writes a per-second CSV, a one-row aggregate CSV with pass/fail flags, and a readable Markdown report.
 
-HQ listening acceptance uses two separate Amount groups, 100% and 45%, because HQ is a waveform wet/dry mix while DFN3 maps Amount to an attenuation limit. Compare Short HQ, DFN3 and 4 s HQ with `--tap denoise --expander 0`; record all four explicit analysis settings (`--noise-window`, `--window`, `--proc-trim-start`, `--trim-end`) for every run. On macOS and Windows, the realtime gate is p99 inference below 100 ms plus host block-size invariance and a 10-minute run. Nuendo acceptance additionally covers 44.1/48 kHz Play/Stop/seek/Cycle, Short Mixdown head/tail (first-sample error at most 128 samples), DOP→realtime fallback, two instances and forced overload.
-
 ---
 
 ## Roadmap
 
-* Complete Nuendo and Windows acceptance for the HQ Lab short-window engine, then promote its experimental identity
+* Validate realtime HQ and Short Mixdown across more hosts and on Windows
 * AAX (Pro Tools) and AU (Logic Pro) builds
 * Validate against Reaper, FL Studio and Studio One
 * More Linux coverage (LV2 / CLAP)

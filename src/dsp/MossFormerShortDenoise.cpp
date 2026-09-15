@@ -671,7 +671,16 @@ void MossFormerShortDenoise::assembleOutput (juce::AudioBuffer<float>& buffer, i
 #else // !STP_ENABLE_MOSSFORMER
 
 MossFormerShortDenoise::~MossFormerShortDenoise() = default;
-void MossFormerShortDenoise::prepare (double, int, int) {}
+void MossFormerShortDenoise::prepare (double sampleRate, int maxBlock, int numChannels)
+{
+    sessionRate = sampleRate;
+    engineRate = 48000.0;
+    numCh = juce::jmax (1, numChannels);
+    maxBlockSession = juce::jmax (1, maxBlock);
+    resampler.prepare (sessionRate, numCh, maxBlockSession);
+    latencySamples = (int) std::ceil ((double) contract48 * (sessionRate / engineRate)
+                                      + resampler.latencySamples());
+}
 void MossFormerShortDenoise::reset() {}
 void MossFormerShortDenoise::setAmount (float) {}
 void MossFormerShortDenoise::process (juce::AudioBuffer<float>&) {}

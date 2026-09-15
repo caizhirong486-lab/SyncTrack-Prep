@@ -78,18 +78,17 @@ MossFormerFrontend::loadDopDither (const juce::File& file, juce::String& error)
 
 void MossFormerFrontend::shortDitherFrame (std::uint64_t globalFrameIndex, float* out)
 {
-    constexpr std::uint64_t kMask = 0xFFFFFFFFFFFFFFFFULL;
-    // matches the Python golden: state = splitmix64(SEED ^ ((idx * K) & MASK))
-    std::uint64_t state = 20260906ULL ^ ((globalFrameIndex * 0x9E3779B97F4A7C15ULL) & kMask);
-    state = (state + 0x9E3779B97F4A7C15ULL) & kMask;
-    state = ((state ^ (state >> 30)) * 0xBF58476D1CE4E5B9ULL) & kMask;
-    state = ((state ^ (state >> 27)) * 0x94D049BB133111EBULL) & kMask;
+    // Unsigned arithmetic wraps modulo 2^64, matching the Python golden mask.
+    std::uint64_t state = 20260906ULL ^ (globalFrameIndex * 0x9E3779B97F4A7C15ULL);
+    state = state + 0x9E3779B97F4A7C15ULL;
+    state = (state ^ (state >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    state = (state ^ (state >> 27)) * 0x94D049BB133111EBULL;
     state ^= (state >> 31);
     auto next = [&state]
     {
-        state = (state + 0x9E3779B97F4A7C15ULL) & kMask;
-        state = ((state ^ (state >> 30)) * 0xBF58476D1CE4E5B9ULL) & kMask;
-        state = ((state ^ (state >> 27)) * 0x94D049BB133111EBULL) & kMask;
+        state = state + 0x9E3779B97F4A7C15ULL;
+        state = (state ^ (state >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        state = (state ^ (state >> 27)) * 0x94D049BB133111EBULL;
         return state ^ (state >> 31);
     };
     for (int i = 0; i < 1920; i += 2)

@@ -11,7 +11,7 @@ juce::File mossModelFromEnv()
 {
     if (auto* env = std::getenv ("STP_MOSS_MODEL"))
         return juce::File (juce::String (env));
-    // The HQ Lab bundle ships the dynamic MaskNet graph; the retired fixed
+    // The release bundle ships the dynamic MaskNet graph; the retired fixed
     // FP32 graph remains only as the DOP gold reference in the engine tests.
     return juce::File::getCurrentWorkingDirectory()
                .getChildFile ("third_party/mossformer2/mossformer2_dynamic.onnx");
