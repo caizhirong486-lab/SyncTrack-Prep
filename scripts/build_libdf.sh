@@ -15,8 +15,8 @@ fi
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
 cd "$SRC_DIR"
-cargo build -p deep_filter --release --target aarch64-apple-darwin
-cargo build -p deep_filter --release --target x86_64-apple-darwin
+cargo build -p deep_filter --release --target aarch64-apple-darwin --features capi
+cargo build -p deep_filter --release --target x86_64-apple-darwin --features capi
 
 OUT_DIR="$ROOT/third_party/dfn/lib"
 mkdir -p "$OUT_DIR"
