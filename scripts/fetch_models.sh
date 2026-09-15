@@ -15,6 +15,10 @@ if [ ! -d "$ROOT/third_party/ort/onnxruntime-osx-universal2-$ORT_VERSION" ]; the
         "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-osx-universal2-$ORT_VERSION.tgz"
     tar xzf /tmp/ort.tgz -C "$ROOT/third_party/ort"
 fi
+ORT_DYLIB="$ROOT/third_party/ort/onnxruntime-osx-universal2-$ORT_VERSION/lib/libonnxruntime.dylib"
+if [ -f "$ORT_DYLIB" ] && command -v install_name_tool >/dev/null 2>&1; then
+    install_name_tool -id @rpath/libonnxruntime.dylib "$ORT_DYLIB"
+fi
 
 # --- MossFormer2 weights (Apache-2.0, alibabasglab/MossFormer2_SE_48K) ---
 CKPT="$ROOT/third_party/mossformer2/last_best_checkpoint.pt"

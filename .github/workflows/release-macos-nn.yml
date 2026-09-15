@@ -1,0 +1,93 @@
+name: release macOS full NN
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        default: v0.3.0
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS Universal 2 — full NN
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      CV_COMMIT: 6b3774dc79c46ae8bed2a4fa5f706f0ac8c75c61
+      DF_COMMIT: d375b2d8309e0935d165700c91da9de862a99c31
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install export dependencies
+        run: >
+          python -m pip install
+          torch==2.14.0 torchaudio==2.11.0
+          numpy==2.5.2 onnx==1.22.0 onnxruntime==1.29.0
+          einops==0.8.2 rotary-embedding-torch==0.9.1 torchinfo==1.8.0
+
+      - name: Pin ClearerVoice source
+        run: |
+          mkdir -p "$HOME/nn-deps"
+          git clone https://github.com/modelscope/ClearerVoice-Studio.git "$HOME/nn-deps/cv-studio"
+          git -C "$HOME/nn-deps/cv-studio" checkout "$CV_COMMIT"
+
+      - name: Build pinned DFN3 library
+        run: |
+          git clone https://github.com/Rikorose/DeepFilterNet.git "$RUNNER_TEMP/df"
+          git -C "$RUNNER_TEMP/df" checkout "$DF_COMMIT"
+          ./scripts/build_libdf.sh "$RUNNER_TEMP/df"
+
+      - name: Reproduce MossFormer models
+        run: |
+          STP_PYTHON_BIN=python ./scripts/fetch_models.sh
+          ORT_DYLIB="third_party/ort/onnxruntime-osx-universal2-1.22.0/lib/libonnxruntime.dylib"
+          install_name_tool -id @rpath/libonnxruntime.dylib "$ORT_DYLIB"
+
+      - name: Configure strict NN build
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DSTP_COPY_AFTER_BUILD=OFF
+          -DSTP_REQUIRE_NN=ON
+
+      - name: Build and test
+        run: |
+          cmake --build build --config Release -j 3
+          ctest --test-dir build --output-on-failure
+
+      - name: Verify and package
+        run: |
+          BUNDLE="build/SyncTrackPrep_artefacts/Release/VST3/SyncTrack Prep.vst3"
+          BIN="$BUNDLE/Contents/MacOS/SyncTrack Prep"
+          lipo -info "$BIN" | grep -q arm64
+          lipo -info "$BIN" | grep -q x86_64
+          codesign --verify --deep --strict "$BUNDLE"
+          test -f "$BUNDLE/Contents/Resources/dfn3/DeepFilterNet3_onnx.tar.gz"
+          test -f "$BUNDLE/Contents/Resources/mossformer2/mossformer2_dynamic.onnx"
+          test -f "$BUNDLE/Contents/Frameworks/libonnxruntime.dylib"
+          test ! -f "$BUNDLE/Contents/Resources/mossformer2/mossformer2_fp32.onnx"
+          mkdir -p dist
+          (cd "$(dirname "$BUNDLE")" && zip -q -r -y \
+            "$GITHUB_WORKSPACE/dist/SyncTrack-Prep-${RELEASE_TAG}-macOS-Universal.zip" \
+            "$(basename "$BUNDLE")")
+
+      - name: Replace draft macOS asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload "$RELEASE_TAG"
+          "dist/SyncTrack-Prep-${RELEASE_TAG}-macOS-Universal.zip"
+          --clobber
