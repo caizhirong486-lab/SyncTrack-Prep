@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="${1:-$HOME/nn-deps/df}"
 REPO_URL="https://github.com/Rikorose/DeepFilterNet.git"
 
@@ -17,7 +18,7 @@ cd "$SRC_DIR"
 cargo build -p deep_filter --release --target aarch64-apple-darwin
 cargo build -p deep_filter --release --target x86_64-apple-darwin
 
-OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/third_party/dfn/lib"
+OUT_DIR="$ROOT/third_party/dfn/lib"
 mkdir -p "$OUT_DIR"
 lipo -create \
     target/aarch64-apple-darwin/release/libdf.a \
@@ -26,7 +27,7 @@ lipo -create \
 lipo -info "$OUT_DIR/libdf_universal.a"
 echo "Wrote $OUT_DIR/libdf_universal.a"
 
-MODEL_DIR="$(cd "$(dirname "$0")/.." && pwd)/third_party/dfn/model"
+MODEL_DIR="$ROOT/third_party/dfn/model"
 mkdir -p "$MODEL_DIR"
 cp models/DeepFilterNet3_onnx.tar.gz "$MODEL_DIR/"
 echo "Wrote $MODEL_DIR/DeepFilterNet3_onnx.tar.gz"
