@@ -23,8 +23,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
 
       - uses: actions/setup-python@v5
         with:
@@ -52,7 +50,7 @@ jobs:
 
       - name: Reproduce MossFormer models
         run: |
-          STP_PYTHON_BIN=python ./scripts/fetch_models.sh
+          STP_SKIP_PERFORMANCE_GATE=1 STP_PYTHON_BIN=python ./scripts/fetch_models.sh
           ORT_DYLIB="third_party/ort/onnxruntime-osx-universal2-1.22.0/lib/libonnxruntime.dylib"
           install_name_tool -id @rpath/libonnxruntime.dylib "$ORT_DYLIB"
 

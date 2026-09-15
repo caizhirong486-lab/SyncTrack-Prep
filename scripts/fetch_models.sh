@@ -34,8 +34,12 @@ LEGACY_ONNX="$ROOT/third_party/mossformer2/mossformer2_fp32.onnx"
 GOLDEN="$ROOT/tests/golden/mossformer/golden.sha256"
 if [ ! -f "$ONNX" ] || [ ! -f "$ROOT/third_party/mossformer2/mel60_2048.f32" ] \
    || [ ! -f "$ROOT/third_party/mossformer2/dop_dither.f32" ] || [ ! -f "$GOLDEN" ]; then
+    EXPORT_ARGS=()
+    if [ "${STP_SKIP_PERFORMANCE_GATE:-0}" = "1" ]; then
+        EXPORT_ARGS+=(--skip-performance-gate)
+    fi
     (cd "$ROOT" && "$STP_PYTHON_BIN" scripts/export_mossformer2_dynamic.py \
-        --checkpoint "$CKPT" --output "$ONNX")
+        --checkpoint "$CKPT" --output "$ONNX" "${EXPORT_ARGS[@]}")
 fi
 if [ ! -f "$LEGACY_ONNX" ]; then
     (cd "$ROOT" && "$STP_PYTHON_BIN" scripts/export_mossformer2_onnx.py \

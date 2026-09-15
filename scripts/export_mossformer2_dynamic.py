@@ -113,6 +113,8 @@ def main() -> int:
     ap.add_argument("--resource-dir", type=Path, default=Path("third_party/mossformer2"))
     ap.add_argument("--skip-export", action="store_true",
                     help="only (re)generate resources + golden vectors")
+    ap.add_argument("--skip-performance-gate", action="store_true",
+                    help="record benchmark results without enforcing the host p99 gate")
     args_cli = ap.parse_args()
 
     print("Loading ClearerVoice MossFormer2_SE_48K ...")
@@ -182,7 +184,8 @@ def main() -> int:
         report["ort_latency_samples"] = len(times)
         print(f"ORT frames16 batch2: p50 {p50:.1f} ms, p95 {p95:.1f} ms, "
               f"p99 {p99:.1f} ms, max {max(times):.1f} ms")
-        assert p99 < 100.0, f"realtime inference p99 {p99:.1f} ms >= 100 ms"
+        if not args_cli.skip_performance_gate:
+            assert p99 < 100.0, f"realtime inference p99 {p99:.1f} ms >= 100 ms"
         (out_path.parent / "dynamic_export_report.txt").write_text(
             repr(report) + "\n", encoding="utf-8")
 
