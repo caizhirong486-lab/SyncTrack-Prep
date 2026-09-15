@@ -31,3 +31,8 @@ MODEL_DIR="$ROOT/third_party/dfn/model"
 mkdir -p "$MODEL_DIR"
 cp models/DeepFilterNet3_onnx.tar.gz "$MODEL_DIR/"
 echo "Wrote $MODEL_DIR/DeepFilterNet3_onnx.tar.gz"
+
+INCLUDE_DIR="$ROOT/third_party/dfn/include"
+mkdir -p "$INCLUDE_DIR"
+cp "$ROOT/scripts/df_api.h" "$INCLUDE_DIR/df.h"
+echo "Wrote $INCLUDE_DIR/df.h"
